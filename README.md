@@ -14,6 +14,7 @@ for several names in one call.
 No install needed (stdlib only):
 
 ```bash
+./agent_worktree_manager/awm                # interactive picker (same as `awm ui`)
 ./agent_worktree_manager/awm list
 ./agent_worktree_manager/awm delete fix-async
 ./agent_worktree_manager/awm delete fix-async scan-interlock memaudit   # batch
@@ -28,6 +29,25 @@ pip install -e ./agent_worktree_manager
 `python -m agent_worktree_manager …` works too when the repo is on `sys.path`.
 
 ### Commands
+
+**`awm ui`** (default when run with no arguments) — full-screen interactive picker. Every sandbox
+is a row with a checkbox; a detail pane shows the current row's metadata: conda env path and disk
+size, each worktree's repo, branch, dirty file count, pushed/unpushed state, size, and last commit
+(age + subject). Sizes are computed in the background and fill in as they arrive.
+
+| Key | Action |
+| --- | --- |
+| `↑`/`↓` or `k`/`j` | move |
+| `space` | check/uncheck the current sandbox |
+| `a` | select all / none |
+| `b` | toggle "also delete branches" |
+| `f` | toggle force (discard uncommitted changes) |
+| `e` / `w` | toggle keep-envs / keep-worktrees |
+| `enter` / `d` | proceed — prints the usual plan and asks for a final y/N |
+| `q` / `esc` | quit without deleting |
+
+Confirmed selections go through exactly the same pipeline as `awm delete`, so all its safety rules
+(dirty refusal, branch keeping, orphan-dir proof, base-env protection) still apply.
 
 **`awm list [--json]`** — show every sandbox: its worktrees (repo, branch, `*` = uncommitted
 changes) and its conda env. Sandboxes that only have an env, or only worktrees, show `-` for the

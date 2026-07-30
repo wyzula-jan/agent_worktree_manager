@@ -523,10 +523,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--json", action="store_true", help="machine-readable output")
     p_list.set_defaults(func=cmd_list)
 
+    p_ui = sub.add_parser(
+        "ui",
+        parents=[common],
+        help="interactive picker: check/uncheck sandboxes to delete (default)",
+    )
+    p_ui.set_defaults(func=cmd_ui)
+
     return parser
 
 
+def cmd_ui(opts: argparse.Namespace) -> int:
+    from agent_worktree_manager.tui import cmd_ui as run
+
+    return run(opts)
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        argv = ["ui"]  # bare `awm` opens the interactive picker
     opts = build_parser().parse_args(argv)
     return opts.func(opts)
 
