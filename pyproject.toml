@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-worktree-manager"
+version = "0.1.0"
+description = "Delete/list agent sandboxes created by clone_worktree_env.sh (git worktrees + cloned conda envs)"
+requires-python = ">=3.10"
+
+[project.scripts]
+awm = "agent_worktree_manager.cli:main"
+
+[tool.setuptools]
+packages = ["agent_worktree_manager"]
+
+[tool.black]
+line-length = 100
+skip-magic-trailing-comma = true
+
+[tool.isort]
+line_length = 100
+profile = "black"
+multi_line_output = 3
+include_trailing_comma = true
