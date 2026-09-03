@@ -196,6 +196,13 @@ def remove_env(conda: str, env_name: str) -> subprocess.CompletedProcess:
     )
 
 
+def remove_env_at(conda: str, env_path: str) -> subprocess.CompletedProcess:
+    """Like remove_env but by prefix, so envs outside the default envs dir work too."""
+    return subprocess.run(
+        [conda, "env", "remove", "--yes", "--prefix", env_path], capture_output=True, text=True
+    )
+
+
 def default_venv_home(root: Path) -> Path:
     val = os.environ.get("VENV_HOME")
     return Path(val).expanduser().resolve() if val else root / VENV_DIRNAME
@@ -649,9 +656,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_ui = sub.add_parser(
         "ui",
         parents=[common],
-        help="interactive picker: check/uncheck sandboxes to delete (default)",
+        help="interactive picker: check/uncheck sandboxes to delete (default); "
+        "Tab switches to the environment browser",
+    )
+    p_ui.add_argument(
+        "--envs", action="store_true", help="start in the environment browser instead"
     )
     p_ui.set_defaults(func=cmd_ui)
+
+    p_envs = sub.add_parser(
+        "envs",
+        parents=[common],
+        help="interactive environment browser: every uv venv and conda env, with "
+        "package listing ([p]) and deletion; Tab switches to the sandbox picker",
+    )
+    p_envs.set_defaults(func=cmd_ui, envs=True)
 
     return parser
 

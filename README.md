@@ -29,7 +29,8 @@ uv venvs are deleted with `rm -rf`, but only after two checks: the path must res
 No install needed (stdlib only):
 
 ```bash
-./agent_worktree_manager/awm                # interactive picker (same as `awm ui`)
+./agent_worktree_manager/awm                # interactive sandbox picker (same as `awm ui`)
+./agent_worktree_manager/awm envs           # interactive environment browser (Tab switches between the two)
 ./agent_worktree_manager/awm list
 ./agent_worktree_manager/awm delete fix-async
 ./agent_worktree_manager/awm delete fix-async scan-interlock memaudit   # batch
@@ -53,19 +54,43 @@ computed in the background and fill in as they arrive.
 Note that on APFS a uv venv's `du` size is mostly copy-on-write clones shared with the uv cache, so the reported size is
 an upper bound on what deleting it actually frees.
 
-| Key                | Action                                                   |
-|--------------------|----------------------------------------------------------|
-| `↑`/`↓` or `k`/`j` | move                                                     |
-| `space`            | check/uncheck the current sandbox                        |
-| `a`                | select all / none                                        |
-| `b`                | toggle "also delete branches"                            |
-| `f`                | toggle force (discard uncommitted changes)               |
-| `e` / `w`          | toggle keep-envs / keep-worktrees                        |
-| `enter` / `d`      | proceed — prints the usual plan and asks for a final y/N |
-| `q` / `esc`        | quit without deleting                                    |
+| Key                       | Action                                                   |
+|---------------------------|----------------------------------------------------------|
+| `↑`/`↓` or `k`/`j`        | move (`PgUp`/`PgDn`, `g`/`G` jump)                       |
+| `space`                   | check/uncheck the current sandbox                        |
+| `a`                       | select all / none (of the filtered view)                 |
+| `/`                       | filter the list (grep-like: every word must match)       |
+| `p`                       | package list of the sandbox's env (see below)            |
+| `tab`                     | switch to the environment browser and back               |
+| `b`                       | toggle "also delete branches"                            |
+| `f`                       | toggle force (discard uncommitted changes)               |
+| `e` / `w`                 | toggle keep-envs / keep-worktrees                        |
+| `enter` / `d`             | proceed — prints the usual plan and asks for a final y/N |
+| `q` / `esc`               | quit without deleting                                    |
 
 Confirmed selections go through exactly the same pipeline as `awm delete`, so all its safety rules (dirty refusal,
 branch keeping, orphan-dir proof, base-env protection) still apply.
+
+**`awm envs`** (or `awm ui --envs`, or `tab` from the sandbox picker) — the same interface for *every* environment
+on the machine: all uv venvs under the venv home and all conda envs, whether or not they belong to a sandbox. Each
+row shows kind, python version, disk size, age of the last change and the sandbox it belongs to (if any); the detail
+pane adds the path, the package count once loaded, the sandbox's worktrees, and why an env is protected. The same
+keys apply (`space`/`a`/`/`/`enter`/`q`/`tab`), and:
+
+| Key | Action                                                                 |
+|-----|------------------------------------------------------------------------|
+| `p` | open the **package list** of the current env                           |
+
+The package list runs `importlib.metadata` with the env's *own* interpreter (so it also works for uv venvs, which
+have no pip) and shows name, version and — for editable installs — the source directory, which is the quick way to
+verify that a sandbox env really points at its worktree. Inside the overlay: `/` types a live filter (grep-like:
+`bec widgets` matches rows containing both), `c` clears it, `j`/`k`/`PgUp`/`PgDn`/`g`/`G` scroll, `r` reloads,
+`esc`/`q` closes.
+
+Protected envs are shown as `[-]` and cannot be selected: the uv base env (`bec_base`), the conda base env
+(`bec_312`), the conda installation root, and whichever env is currently active or running `awm`. Deleting an env
+that belongs to a sandbox leaves the sandbox's worktrees in place (the plan says so); use the sandbox picker or
+`awm delete` to remove both halves together.
 
 **`awm list [--json]`** — show every sandbox: its worktrees (repo, branch, `*` = uncommitted changes) and its env
 flavours. Sandboxes that only have an env, or only worktrees, show `-` for the missing half.
