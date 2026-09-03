@@ -35,8 +35,7 @@ class WtInfo:
 @dataclass
 class Item:
     name: str
-    env_name: str | None = None
-    env_path: str | None = None
+    envs: list = field(default_factory=list)  # list[cli.Env]
     wts: list[WtInfo] = field(default_factory=list)
     env_size_kb: int | None = None
     selected: bool = False
@@ -93,7 +92,9 @@ def wt_info(wt: cli.Worktree) -> WtInfo:
     return info
 
 
-def gather(root: Path, base_env: str) -> tuple[list[Item], str | None]:
+def gather(
+    root: Path, base_env: str, conda_base_env: str, venv_home: Path
+) -> tuple[list[Item], str | None]:
     """All sandboxes under *root* with per-worktree metadata, plus the conda exe."""
     items: dict[str, Item] = {}
     for repo in cli.find_repos(root):
@@ -104,13 +105,16 @@ def gather(root: Path, base_env: str) -> tuple[list[Item], str | None]:
                 items.setdefault(name, Item(name=name)).wts.append(wt_info(wt))
 
     conda = cli.find_conda()
-    envs = cli.conda_envs(conda) if conda else {}
-    env_prefix = f"{base_env}_"
-    for env_name, path in envs.items():
-        if env_name.startswith(env_prefix) and len(env_name) > len(env_prefix):
-            name = env_name[len(env_prefix) :]
-            item = items.setdefault(name, Item(name=name))
-            item.env_name, item.env_path = env_name, path
+    sources = (
+        (cli.uv_envs(venv_home), "uv", f"{base_env}_"),
+        (cli.conda_envs(conda) if conda else {}, "conda", f"{conda_base_env}_"),
+    )
+    for env_map, kind, env_prefix in sources:
+        for env_name, path in env_map.items():
+            if env_name.startswith(env_prefix) and len(env_name) > len(env_prefix):
+                name = env_name[len(env_prefix) :]
+                item = items.setdefault(name, Item(name=name))
+                item.envs.append(cli.Env(name=env_name, path=path, kind=kind))
 
     return [items[k] for k in sorted(items)], conda
 
@@ -126,8 +130,9 @@ def _du_kb(path: str | Path) -> int | None:
 def start_size_thread(items: list[Item]) -> None:
     def work() -> None:
         for item in items:
-            if item.env_path:
-                item.env_size_kb = _du_kb(item.env_path)
+            if item.envs:
+                sizes = [_du_kb(e.path) for e in item.envs]
+                item.env_size_kb = sum(filter(None, sizes)) if any(sizes) else None
             for w in item.wts:
                 if not w.wt.prunable:
                     w.size_kb = _du_kb(w.wt.path)
@@ -180,7 +185,7 @@ def _draw(
     _safe_add(stdscr, 2, 0, f" {toggles}", dim)
 
     current = items[idx]
-    detail_h = 2 + max(1, len(current.wts)) + (1 if current.env_name else 1)
+    detail_h = 2 + max(1, len(current.wts)) + max(1, len(current.envs))
     list_h = max(1, h - 4 - detail_h - 1)
     if idx < top:
         top = idx
@@ -192,8 +197,9 @@ def _draw(
         y = 4 + row
         is_cur = (top + row) == idx
         box = "[x]" if item.selected else "[ ]"
-        env_sz = human_size(item.env_size_kb) if item.env_path else "-"
-        line = f" {'>' if is_cur else ' '} {box} {item.name:<{name_w}} env {env_sz:>6}  {_wt_summary(item)}"
+        env_sz = human_size(item.env_size_kb) if item.envs else "-"
+        kinds = "/".join(e.kind for e in item.envs) or "-"
+        line = f" {'>' if is_cur else ' '} {box} {item.name:<{name_w}} {kinds:>10} {env_sz:>6}  {_wt_summary(item)}"
         _safe_add(stdscr, y, 0, line, curses.A_REVERSE if is_cur else 0)
 
     sep_y = 4 + list_h
@@ -202,7 +208,7 @@ def _draw(
     n_sel = sum(1 for i in items if i.selected)
     total = sum(i.total_kb for i in items if i.selected)
     pending = any(
-        (i.env_path and i.env_size_kb is None)
+        (i.envs and i.env_size_kb is None)
         or any(w.size_kb is None and not w.wt.prunable for w in i.wts)
         for i in items
         if i.selected
@@ -211,16 +217,13 @@ def _draw(
     _safe_add(stdscr, y, 1, f"{current.name}", bold)
     _safe_add(stdscr, y, 2 + len(current.name), f"    selected: {n_sel}  ({total_str})", dim)
     y += 1
-    if current.env_name and current.env_path:
-        _safe_add(
-            stdscr,
-            y,
-            1,
-            f"env  {current.env_name}  {human_size(current.env_size_kb):>6}  {current.env_path}",
-        )
+    if current.envs:
+        for env in current.envs:
+            _safe_add(stdscr, y, 1, f"env  {env.label}  {env.path}")
+            y += 1
     else:
         _safe_add(stdscr, y, 1, "env  (none)", dim)
-    y += 1
+        y += 1
     if not current.wts:
         _safe_add(stdscr, y, 1, "wt   (none)", dim)
     for wi in current.wts:
@@ -291,7 +294,12 @@ def cmd_ui(opts: argparse.Namespace) -> int:
         return 2
 
     cli.log(f"gathering sandboxes under {root}…")
-    items, _conda = gather(root, opts.base_env)
+    venv_home = (
+        Path(opts.venv_home).expanduser().resolve()
+        if opts.venv_home
+        else cli.default_venv_home(root)
+    )
+    items, _conda = gather(root, opts.base_env, opts.conda_base_env, venv_home)
     if not items:
         cli.log("no sandboxes found")
         return 0
@@ -307,6 +315,8 @@ def cmd_ui(opts: argparse.Namespace) -> int:
         names=[i.name for i in items if i.selected],
         root=str(root),
         base_env=opts.base_env,
+        conda_base_env=opts.conda_base_env,
+        venv_home=str(venv_home),
         dry_run=False,
         force=state["force"],
         yes=False,  # cmd_delete shows the plan and asks for a final y/N

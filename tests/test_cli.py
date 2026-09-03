@@ -192,3 +192,93 @@ def test_primary_checkout_never_touched(workspace, tmp_path):
     _git("init", "-b", "main", cwd=other)
     assert cli.main(["delete", "tools", "--root", str(root), "--yes", "--force"]) == 1
     assert (other / ".git").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# uv venv sandboxes (and conda -> uv migration)
+# ---------------------------------------------------------------------------
+def _make_venv(venv_home: Path, name: str) -> Path:
+    """A directory that looks like a uv venv to remove_uv_env()."""
+    venv = venv_home / name
+    (venv / "bin").mkdir(parents=True)
+    py = venv / "bin" / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    (venv / "pyvenv.cfg").write_text("home = /usr\n")
+    return venv
+
+
+def test_uv_env_only_sandbox(workspace):
+    root, _ = workspace
+    venv = _make_venv(root / cli.VENV_DIRNAME, "bec_base_uvonly")
+    assert cli.main(["delete", "uvonly", "--root", str(root), "--yes"]) == 0
+    assert not venv.exists()
+
+
+def test_uv_venv_and_worktree_both_removed(workspace):
+    root, repo = workspace
+    wt = _add_worktree(root, repo, "t1")
+    venv = _make_venv(root / cli.VENV_DIRNAME, "bec_base_t1")
+    assert cli.main(["delete", "t1", "--root", str(root), "--yes"]) == 0
+    assert not wt.exists() and not venv.exists()
+
+
+def test_deletes_uv_and_legacy_conda_env_together(workspace, monkeypatch):
+    """Half-migrated sandbox: both envs go in one call."""
+    root, _ = workspace
+    venv = _make_venv(root / cli.VENV_DIRNAME, "bec_base_both")
+    removed = []
+    monkeypatch.setattr(cli, "find_conda", lambda: "/fake/conda")
+    monkeypatch.setattr(
+        cli, "conda_envs", lambda conda: {"bec_312_both": "/fake/envs/bec_312_both"}
+    )
+    monkeypatch.setattr(
+        cli,
+        "remove_env",
+        lambda conda, name: (removed.append(name), subprocess.CompletedProcess([], 0, "", ""))[1],
+    )
+    assert cli.main(["delete", "both", "--root", str(root), "--yes"]) == 0
+    assert removed == ["bec_312_both"]
+    assert not venv.exists()
+
+
+def test_uv_keep_env(workspace):
+    root, repo = workspace
+    wt = _add_worktree(root, repo, "t1")
+    venv = _make_venv(root / cli.VENV_DIRNAME, "bec_base_t1")
+    assert cli.main(["delete", "t1", "--root", str(root), "--yes", "--keep-env"]) == 0
+    assert venv.exists() and not wt.exists()
+
+
+def test_base_env_itself_is_never_a_sandbox(workspace):
+    """`bec_base` has no `_<name>` suffix, so it is never picked up."""
+    root, _ = workspace
+    base = _make_venv(root / cli.VENV_DIRNAME, "bec_base")
+    assert cli.main(["delete", "base", "--root", str(root), "--yes"]) == 1
+    assert base.exists()
+
+
+def test_remove_uv_env_refuses_outside_venv_home(tmp_path):
+    outside = _make_venv(tmp_path / "elsewhere", "victim")
+    with pytest.raises(ValueError, match="not under"):
+        cli.remove_uv_env(str(outside), tmp_path / ".venvs")
+    assert outside.exists()
+
+
+def test_remove_uv_env_refuses_non_venv(tmp_path):
+    venv_home = tmp_path / ".venvs"
+    plain = venv_home / "not-a-venv"
+    plain.mkdir(parents=True)
+    (plain / "important.txt").write_text("keep me\n")
+    with pytest.raises(ValueError, match="does not look like a venv"):
+        cli.remove_uv_env(str(plain), venv_home)
+    assert plain.exists()
+
+
+def test_list_reports_env_kind(workspace, capsys):
+    root, repo = workspace
+    _add_worktree(root, repo, "t1")
+    _make_venv(root / cli.VENV_DIRNAME, "bec_base_t1")
+    assert cli.main(["list", "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert "uv" in out and "t1" in out

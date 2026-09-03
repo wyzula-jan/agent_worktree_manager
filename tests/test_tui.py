@@ -47,11 +47,11 @@ def test_gather_collects_metadata(workspace):
     _git("worktree", "add", "-b", "t1", str(wt), "main", cwd=repo)
     (wt / "dirty.txt").write_text("x\n")
 
-    items, conda = tui.gather(root, "bec_312")
+    items, conda = tui.gather(root, "bec_base", "bec_312", root / cli.VENV_DIRNAME)
     assert conda is None
     assert [i.name for i in items] == ["t1"]
     item = items[0]
-    assert item.env_name is None
+    assert item.envs == []
     assert len(item.wts) == 1
     wi = item.wts[0]
     assert wi.wt.branch == "t1"
@@ -67,10 +67,31 @@ def test_gather_env_only(workspace, monkeypatch):
     monkeypatch.setattr(
         cli, "conda_envs", lambda conda: {"bec_312_solo": "/fake/envs/bec_312_solo"}
     )
-    items, _ = tui.gather(root, "bec_312")
+    items, _ = tui.gather(root, "bec_base", "bec_312", root / cli.VENV_DIRNAME)
     assert [i.name for i in items] == ["solo"]
-    assert items[0].env_name == "bec_312_solo"
+    assert [(e.name, e.kind) for e in items[0].envs] == [("bec_312_solo", "conda")]
     assert items[0].wts == []
+
+
+def _make_venv(venv_home, name):
+    d = venv_home / name / "bin"
+    d.mkdir(parents=True)
+    (d / "python").write_text("#!/bin/sh\n")
+    (d / "python").chmod(0o755)
+    return venv_home / name
+
+
+def test_gather_finds_uv_and_conda_envs(workspace, monkeypatch):
+    """A half-migrated sandbox has both a uv venv and a legacy conda env."""
+    root, _ = workspace
+    _make_venv(root / cli.VENV_DIRNAME, "bec_base_both")
+    monkeypatch.setattr(cli, "find_conda", lambda: "/fake/conda")
+    monkeypatch.setattr(
+        cli, "conda_envs", lambda conda: {"bec_312_both": "/fake/envs/bec_312_both"}
+    )
+    items, _ = tui.gather(root, "bec_base", "bec_312", root / cli.VENV_DIRNAME)
+    assert [i.name for i in items] == ["both"]
+    assert [e.kind for e in items[0].envs] == ["uv", "conda"]
 
 
 def test_du_kb(tmp_path):

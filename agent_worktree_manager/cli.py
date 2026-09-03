@@ -1,9 +1,16 @@
 """awm — agent worktree manager.
 
 Cleanup counterpart to ``clone_worktree_env.sh``: deletes the git worktrees
-(``<repo>_<name>``) and the cloned conda env (``<base_env>_<name>``) that make
-up a background-task sandbox. Works when only one of the two still exists, and
-accepts several sandbox names at once.
+(``<repo>_<name>``) and the sandbox env that make up a background-task sandbox.
+Works when only one half still exists, and accepts several names at once.
+
+Two env flavours are recognised, so the conda -> uv migration can be done
+gradually and the leftovers cleaned up afterwards:
+
+  * uv     ``<venv_home>/<base_env>_<name>``   (default: PSI/.venvs/bec_base_*)
+  * conda  ``<conda_base_env>_<name>``         (legacy, default: bec_312_*)
+
+A sandbox may have both at once; ``delete`` removes every env it finds.
 
 Safety model:
   * worktrees with uncommitted changes are refused unless --force
@@ -27,7 +34,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_BASE_ENV = "bec_312"
+DEFAULT_BASE_ENV = "bec_base"  # uv venvs, under <root>/<VENV_DIRNAME>
+DEFAULT_CONDA_BASE_ENV = "bec_312"  # legacy conda envs, kept for cleanup
+VENV_DIRNAME = ".venvs"
 ROOT_MARKER = "clone_worktree_env.sh"
 NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
@@ -136,8 +145,19 @@ def is_orphan_worktree_dir(d: Path, repo: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Conda helpers
+# Environments (uv venvs and legacy conda envs)
 # ---------------------------------------------------------------------------
+@dataclass
+class Env:
+    name: str
+    path: str
+    kind: str  # "uv" | "conda"
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.kind})"
+
+
 def find_conda() -> str | None:
     exe = os.environ.get("CONDA_EXE", "")
     if exe and os.access(exe, os.X_OK):
@@ -176,6 +196,34 @@ def remove_env(conda: str, env_name: str) -> subprocess.CompletedProcess:
     )
 
 
+def default_venv_home(root: Path) -> Path:
+    val = os.environ.get("VENV_HOME")
+    return Path(val).expanduser().resolve() if val else root / VENV_DIRNAME
+
+
+def uv_envs(venv_home: Path) -> dict[str, str]:
+    """Mapping of venv name -> venv path for every uv venv under *venv_home*."""
+    if not venv_home.is_dir():
+        return {}
+    return {
+        d.name: str(d)
+        for d in sorted(venv_home.iterdir())
+        if d.is_dir() and (d / "bin" / "python").exists()
+    }
+
+
+def remove_uv_env(path: str, venv_home: Path) -> None:
+    """rm -rf a uv venv, but only when it provably is one and lives under venv_home."""
+    p = Path(path).resolve()
+    try:
+        p.relative_to(venv_home.resolve())
+    except ValueError as exc:
+        raise ValueError(f"refusing to delete '{p}': not under {venv_home}") from exc
+    if not (p / "bin" / "python").exists():
+        raise ValueError(f"refusing to delete '{p}': does not look like a venv")
+    shutil.rmtree(p)
+
+
 # ---------------------------------------------------------------------------
 # Workspace discovery
 # ---------------------------------------------------------------------------
@@ -207,26 +255,28 @@ def find_repos(root: Path) -> list[Path]:
 class Sandbox:
     name: str
     sanitized: str
-    env_name: str
+    expected_envs: list[str] = field(default_factory=list)  # names we looked for
+    envs: list[Env] = field(default_factory=list)  # the ones that exist
     worktrees: list[Worktree] = field(default_factory=list)  # live, dir exists
     stale: list[Worktree] = field(default_factory=list)  # registered, dir gone
     orphans: list[tuple[Path, Path]] = field(default_factory=list)  # (repo, dir)
-    env_path: str | None = None
 
     @property
     def found(self) -> bool:
-        return bool(self.worktrees or self.stale or self.orphans or self.env_path)
+        return bool(self.worktrees or self.stale or self.orphans or self.envs)
 
 
 def resolve_sandbox(
     root: Path,
     repo_worktrees: dict[Path, list[Worktree]],
-    envs: dict[str, str],
+    venvs: dict[str, str],
+    conda_env_map: dict[str, str],
     base_env: str,
+    conda_base_env: str,
     name: str,
 ) -> Sandbox:
     sanitized = name.replace("/", "-")
-    sb = Sandbox(name=name, sanitized=sanitized, env_name=f"{base_env}_{sanitized}")
+    sb = Sandbox(name=name, sanitized=sanitized)
     for repo, wts in repo_worktrees.items():
         expected = f"{repo.name}_{sanitized}"
         registered = False
@@ -237,7 +287,14 @@ def resolve_sandbox(
         d = root / expected
         if not registered and d.is_dir() and is_orphan_worktree_dir(d, repo):
             sb.orphans.append((repo, d))
-    sb.env_path = envs.get(sb.env_name)
+    for env_name, kind, source in (
+        (f"{base_env}_{sanitized}", "uv", venvs),
+        (f"{conda_base_env}_{sanitized}", "conda", conda_env_map),
+    ):
+        sb.expected_envs.append(env_name)
+        path = source.get(env_name)
+        if path:
+            sb.envs.append(Env(name=env_name, path=path, kind=kind))
     return sb
 
 
@@ -259,11 +316,12 @@ def print_plan(sb: Sandbox, opts: argparse.Namespace) -> None:
         )
     for repo, d in sb.orphans:
         print(f"    orphan    {d.name}  (unregistered worktree dir of {repo.name}){skip_wt}")
-    if sb.env_path:
+    if sb.envs:
         kept = "  (kept: --keep-env)" if opts.keep_env else ""
-        print(f"    env       {sb.env_name}  ({sb.env_path}){kept}")
+        for env in sb.envs:
+            print(f"    env       {env.label}  ({env.path}){kept}")
     else:
-        print(f"    env       {sb.env_name} — not found, skipping")
+        print(f"    env       none found (looked for: {', '.join(sb.expected_envs)})")
     if not (sb.worktrees or sb.stale or sb.orphans):
         print("    worktrees — none found")
 
@@ -278,7 +336,9 @@ def delete_branch(wt: Worktree, force: bool) -> None:
         )
 
 
-def delete_sandbox(sb: Sandbox, conda: str | None, opts: argparse.Namespace) -> list[str]:
+def delete_sandbox(
+    sb: Sandbox, conda: str | None, venv_home: Path, opts: argparse.Namespace
+) -> list[str]:
     errors: list[str] = []
 
     if not opts.keep_worktrees:
@@ -320,18 +380,42 @@ def delete_sandbox(sb: Sandbox, conda: str | None, opts: argparse.Namespace) -> 
             git(repo, "worktree", "prune")
             log(f"[{repo.name}] deleted orphaned worktree dir {d.name}")
 
-    if sb.env_path and not opts.keep_env:
-        if conda is None:
-            errors.append(f"cannot remove env '{sb.env_name}': conda executable not found")
-        else:
-            log(f"removing conda env '{sb.env_name}'…")
-            r = remove_env(conda, sb.env_name)
-            if r.returncode != 0:
-                errors.append(f"conda env remove '{sb.env_name}' failed: {r.stderr.strip()}")
+    if not opts.keep_env:
+        for env in sb.envs:
+            if env.kind == "conda":
+                if conda is None:
+                    errors.append(
+                        f"cannot remove conda env '{env.name}': conda executable not found"
+                    )
+                    continue
+                log(f"removing conda env '{env.name}'…")
+                r = remove_env(conda, env.name)
+                if r.returncode != 0:
+                    errors.append(f"conda env remove '{env.name}' failed: {r.stderr.strip()}")
+                else:
+                    log(f"removed conda env '{env.name}'")
             else:
-                log(f"removed conda env '{sb.env_name}'")
+                log(f"removing uv venv '{env.name}'…")
+                try:
+                    remove_uv_env(env.path, venv_home)
+                except (ValueError, OSError) as exc:
+                    errors.append(f"uv venv remove '{env.name}' failed: {exc}")
+                else:
+                    log(f"removed uv venv '{env.name}'")
 
     return errors
+
+
+def sync_pycharm(root: Path) -> None:
+    """Drop the PyCharm modules/SDKs that just became dangling. Best-effort."""
+    script = root / "pycharm_wire.py"
+    if not os.access(script, os.X_OK):
+        return
+    log("pruning PyCharm modules/SDKs…")
+    r = subprocess.run([str(script), "--prune", "--if-closed"], capture_output=True, text=True)
+    for line in (r.stdout + r.stderr).splitlines():
+        if line.strip():
+            print(f"  {line}")
 
 
 def hint_for_unknown(name: str, repos: list[Path]) -> str | None:
@@ -354,20 +438,30 @@ def cmd_delete(opts: argparse.Namespace) -> int:
             err(f"invalid name '{name}' (use letters, digits, . _ - /)")
             return 2
 
+    venv_home = (
+        Path(opts.venv_home).expanduser().resolve() if opts.venv_home else default_venv_home(root)
+    )
+    venvs = uv_envs(venv_home)
     conda = find_conda()
     if conda is None:
-        warn("conda not found — env cleanup will be skipped (set CONDA_EXE to fix)")
-    envs = conda_envs(conda) if conda else {}
+        warn("conda not found — legacy conda env cleanup will be skipped (set CONDA_EXE to fix)")
+    conda_env_map = conda_envs(conda) if conda else {}
     repo_worktrees = {repo: worktrees_of(repo) for repo in repos}
 
-    log(f"workspace root: {root}  (base env: {opts.base_env})")
+    log(
+        f"workspace root: {root}  (uv: {opts.base_env}_* in {venv_home}, conda: {opts.conda_base_env}_*)"
+    )
     plans: list[Sandbox] = []
     missing = 0
     for name in opts.names:
-        sb = resolve_sandbox(root, repo_worktrees, envs, opts.base_env, name)
+        sb = resolve_sandbox(
+            root, repo_worktrees, venvs, conda_env_map, opts.base_env, opts.conda_base_env, name
+        )
         if not sb.found:
             missing += 1
-            warn(f"nothing found for '{name}' (no worktrees, no env '{sb.env_name}')")
+            warn(
+                f"nothing found for '{name}' (no worktrees, no env: {', '.join(sb.expected_envs)})"
+            )
             hint = hint_for_unknown(name, repos)
             if hint:
                 warn(f"  {hint}")
@@ -396,7 +490,7 @@ def cmd_delete(opts: argparse.Namespace) -> int:
 
     all_errors: list[str] = []
     for sb in plans:
-        errors = delete_sandbox(sb, conda, opts)
+        errors = delete_sandbox(sb, conda, venv_home, opts)
         if errors:
             for e in errors:
                 err(f"[{sb.name}] {e}")
@@ -406,6 +500,8 @@ def cmd_delete(opts: argparse.Namespace) -> int:
 
     if not opts.delete_branch and any(sb.worktrees for sb in plans):
         log("branches were kept (use --delete-branch to remove them too)")
+
+    sync_pycharm(root)
 
     return 1 if (all_errors or missing) else 0
 
@@ -426,20 +522,28 @@ def cmd_list(opts: argparse.Namespace) -> int:
         for wt in worktrees_of(repo):
             if wt.path.name.startswith(prefix) and len(wt.path.name) > len(prefix):
                 name = wt.path.name[len(prefix) :]
-                sandboxes.setdefault(name, {"worktrees": [], "env": None})["worktrees"].append(wt)
+                sandboxes.setdefault(name, {"worktrees": [], "envs": []})["worktrees"].append(wt)
 
+    venv_home = (
+        Path(opts.venv_home).expanduser().resolve() if opts.venv_home else default_venv_home(root)
+    )
     conda = find_conda()
-    envs = conda_envs(conda) if conda else {}
-    env_prefix = f"{opts.base_env}_"
-    for env_name in envs:
-        if env_name.startswith(env_prefix) and len(env_name) > len(env_prefix):
-            name = env_name[len(env_prefix) :]
-            sandboxes.setdefault(name, {"worktrees": [], "env": None})["env"] = env_name
+    sources = (
+        (uv_envs(venv_home), "uv", f"{opts.base_env}_"),
+        (conda_envs(conda) if conda else {}, "conda", f"{opts.conda_base_env}_"),
+    )
+    for env_map, kind, prefix in sources:
+        for env_name, env_path in env_map.items():
+            if env_name.startswith(prefix) and len(env_name) > len(prefix):
+                name = env_name[len(prefix) :]
+                sandboxes.setdefault(name, {"worktrees": [], "envs": []})["envs"].append(
+                    Env(name=env_name, path=env_path, kind=kind)
+                )
 
     if opts.json:
         payload = {
             name: {
-                "env": sb["env"],
+                "envs": [{"name": e.name, "kind": e.kind, "path": e.path} for e in sb["envs"]],
                 "worktrees": [
                     {
                         "repo": wt.repo.name,
@@ -460,16 +564,22 @@ def cmd_list(opts: argparse.Namespace) -> int:
         log(f"no sandboxes found under {root}")
         return 0
 
-    log(f"workspace root: {root}  (base env: {opts.base_env})")
+    log(
+        f"workspace root: {root}  (uv: {opts.base_env}_* in {venv_home}, conda: {opts.conda_base_env}_*)"
+    )
+
+    def env_cell(sb: dict) -> str:
+        return ", ".join(e.kind for e in sb["envs"]) or "-"
+
     name_w = max(len(n) for n in sandboxes) + 2
-    env_w = max((len(sb["env"] or "-") for sb in sandboxes.values()), default=1) + 2
+    env_w = max((len(env_cell(sb)) for sb in sandboxes.values()), default=3) + 2
     print(f"  {'NAME':<{name_w}}{'ENV':<{env_w}}WORKTREES")
     for name, sb in sorted(sandboxes.items()):
         parts = []
         for wt in sb["worktrees"]:
             marker = " (missing)" if wt.prunable else ("*" if is_dirty(wt.path) else "")
             parts.append(f"{wt.repo.name}[{wt.branch or 'detached'}]{marker}")
-        print(f"  {name:<{name_w}}{(sb['env'] or '-'):<{env_w}}{', '.join(parts) or '-'}")
+        print(f"  {name:<{name_w}}{env_cell(sb):<{env_w}}{', '.join(parts) or '-'}")
     print("  (* = uncommitted changes)")
     return 0
 
@@ -487,7 +597,19 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--base-env",
         default=os.environ.get("BASE_ENV", DEFAULT_BASE_ENV),
-        help=f"base conda env the sandbox envs were cloned from (default: {DEFAULT_BASE_ENV})",
+        help=f"name of the primary uv env; sandboxes are <base-env>_<name> "
+        f"(default: {DEFAULT_BASE_ENV})",
+    )
+    common.add_argument(
+        "--conda-base-env",
+        default=os.environ.get("CONDA_BASE_ENV", DEFAULT_CONDA_BASE_ENV),
+        help=f"legacy conda base env; its <name>_ clones are still found and "
+        f"deleted (default: {DEFAULT_CONDA_BASE_ENV})",
+    )
+    common.add_argument(
+        "--venv-home",
+        default=os.environ.get("VENV_HOME"),
+        help=f"directory holding the uv venvs (default: <root>/{VENV_DIRNAME})",
     )
 
     parser = argparse.ArgumentParser(
@@ -499,7 +621,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_del = sub.add_parser(
         "delete",
         parents=[common],
-        help="delete sandboxes: their <repo>_<name> worktrees and <base_env>_<name> conda env",
+        help="delete sandboxes: their <repo>_<name> worktrees and every "
+        "<base_env>_<name> uv venv / legacy conda env found",
     )
     p_del.add_argument("names", nargs="+", metavar="NAME", help="sandbox name(s), e.g. fix-async")
     p_del.add_argument("-n", "--dry-run", action="store_true", help="show what would be deleted")
@@ -511,7 +634,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_del.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
     p_del.add_argument("--keep-env", action="store_true", help="delete only the worktrees")
-    p_del.add_argument("--keep-worktrees", action="store_true", help="delete only the conda env")
+    p_del.add_argument("--keep-worktrees", action="store_true", help="delete only the env(s)")
     p_del.add_argument(
         "--delete-branch",
         action="store_true",
