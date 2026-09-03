@@ -777,10 +777,9 @@ class App:
         if self.msg and time.time() < self.msg_until:
             _safe_add(scr, h - 1, 1, self.msg, curses.A_BOLD)
 
-        scr.noutrefresh()
         if self.overlay is not None:
             self._draw_overlay()
-        curses.doupdate()
+        scr.refresh()
 
     def _row(self, item, name_w: int) -> str:
         if isinstance(item, EnvItem):
@@ -800,15 +799,13 @@ class App:
         scr = self.scr
         bold, dim = curses.A_BOLD, curses.A_DIM
         if isinstance(cur, EnvItem):
-            total = sum(i.size_kb or 0 for i in self.selected_items())
-            _safe_add(scr, y, 1, f"{cur.name}  ({cur.env.kind})", bold)
-            _safe_add(
-                scr,
-                y,
-                4 + len(cur.name) + len(cur.env.kind),
-                f"    selected: {n_sel}  (~{human_size(total)})",
-                dim,
-            )
+            selected = self.selected_items()
+            total = sum(i.size_kb or 0 for i in selected)
+            pending = any(i.size_kb is None for i in selected)
+            total_str = f"~{human_size(total)}{'+…' if pending else ''}" if n_sel else "0K"
+            label = f"{cur.name}  ({cur.env.kind})"
+            _safe_add(scr, y, 1, label, bold)
+            _safe_add(scr, y, 1 + len(label), f"    selected: {n_sel}  ({total_str})", dim)
             _safe_add(scr, y + 1, 1, f"path     {cur.env.path}")
             if cur.pkgs is not None:
                 editable = sum(1 for p in cur.pkgs if p.editable)
@@ -872,44 +869,43 @@ class App:
             y += 1
 
     def _draw_overlay(self) -> None:
+        """Package list box, painted over the main screen (top-left at (1, 2))."""
         ov = self.overlay
         assert ov is not None
-        h, w = self.scr.getmaxyx()
+        scr = self.scr
+        h, w = scr.getmaxyx()
+        y0, x0 = 1, 2
         bh, bw = max(6, h - 2), max(20, w - 4)
-        try:
-            win = curses.newwin(bh, bw, 1, 2)
-        except curses.error:
-            return
-        win.erase()
-        try:
-            win.box()
-        except curses.error:
-            pass
+        inner = bw - 2
+
+        def put(row: int, col: int, text: str, attr: int = 0) -> None:
+            _safe_add(scr, y0 + row, x0 + col, text[: bw - col - 1], attr)
+
+        put(0, 0, "┌" + "─" * inner + "┐")
+        for row in range(1, bh - 1):
+            put(row, 0, "│" + " " * inner + "│")
+        put(bh - 1, 0, "└" + "─" * inner + "┘")
+
         env = ov.env
         vis = ov.visible
         total = len(env.pkgs or [])
         title = (
             f" packages in {env.name} ({env.env.kind}, python {env.python})  —  {len(vis)}/{total} "
         )
-        _safe_add(win, 0, 2, title, curses.A_BOLD)
+        put(0, 2, title, curses.A_BOLD)
         cursor = "_" if ov.editing else ""
-        _safe_add(win, 1, 2, f"/ {ov.filter}{cursor}", curses.A_BOLD if ov.editing else 0)
-        _safe_add(
-            win,
-            1,
-            max(2, bw - 66),
-            "[/] filter  [c] clear  [j/k PgUp/PgDn g/G] scroll  [r] reload  [esc] close",
-            curses.A_DIM,
-        )
-        _safe_add(win, 2, 1, "─" * (bw - 2), curses.A_DIM)
+        put(1, 2, f"/ {ov.filter}{cursor}", curses.A_BOLD if ov.editing else 0)
+        help_text = "[/] filter  [c] clear  [j/k PgUp/PgDn g/G] scroll  [r] reload  [esc] close"
+        put(1, max(2, inner - len(help_text)), help_text, curses.A_DIM)
+        put(2, 1, "─" * inner, curses.A_DIM)
 
         rows = bh - 4
         if env.pkgs_loading:
-            _safe_add(win, 3, 2, "loading…  (running the env's interpreter)", curses.A_DIM)
+            put(3, 2, "loading…  (running the env's interpreter)", curses.A_DIM)
         elif env.pkgs_error:
-            _safe_add(win, 3, 2, f"error: {env.pkgs_error}", curses.A_BOLD)
+            put(3, 2, f"error: {env.pkgs_error}", curses.A_BOLD)
         elif not vis:
-            _safe_add(win, 3, 2, "no matches" if ov.filter else "no packages", curses.A_DIM)
+            put(3, 2, "no matches" if ov.filter else "no packages", curses.A_DIM)
         else:
             ov.scroll = max(0, min(ov.scroll, max(0, len(vis) - rows)))
             name_w = min(max(len(p.name) for p in vis) + 2, 40)
@@ -918,11 +914,10 @@ class App:
                 line = f"{pkg.name:<{name_w}}{pkg.version:<{ver_w}}"
                 if pkg.editable:
                     line += f"-> {pkg.editable}"
-                _safe_add(win, 3 + i, 2, line, curses.A_BOLD if pkg.editable else 0)
+                put(3 + i, 2, line, curses.A_BOLD if pkg.editable else 0)
             if len(vis) > rows:
                 pos = f" {ov.scroll + 1}-{min(len(vis), ov.scroll + rows)} of {len(vis)} "
-                _safe_add(win, bh - 1, bw - len(pos) - 3, pos, curses.A_DIM)
-        win.noutrefresh()
+                put(bh - 1, inner - len(pos) - 1, pos, curses.A_DIM)
 
     # -- loop -----------------------------------------------------------------
     def run(self) -> str:
