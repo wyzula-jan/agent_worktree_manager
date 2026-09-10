@@ -144,10 +144,13 @@ def test_tui_activates_in_original_shell(make_workspace, tmp_path, monkeypatch, 
     pid, terminal = pty.fork()
     if pid == 0:
         os.execv(executable, [executable, *options, "-i", "-c", startup])
+    # A cold conda installation on hosted runners can spend over 30 seconds
+    # in its first shell hook. Keep the tighter budget for venv/uv activation.
+    timeout = 120 if kind == "conda" else 30
     reaped = False
     output = b""
     try:
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + timeout
         selected = False
         while time.monotonic() < deadline:
             if select.select([terminal], [], [], 0.05)[0]:
@@ -164,7 +167,19 @@ def test_tui_activates_in_original_shell(make_workspace, tmp_path, monkeypatch, 
                 reaped = True
                 assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
                 break
-        assert reaped, output.decode(errors="replace")
+        if not reaped:
+            processes = subprocess.run(
+                ["ps", "-u", str(os.getuid()), "-o", "pid,ppid,pgid,stat,comm"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            pytest.fail(
+                f"Shell {pid} did not exit within {timeout} seconds "
+                f"(activation selected: {selected})."
+                f"\nTerminal output:\n{output.decode(errors='replace')}"
+                f"\nProcesses:\n{processes.stdout}{processes.stderr}"
+            )
         assert selected
     finally:
         os.close(terminal)
