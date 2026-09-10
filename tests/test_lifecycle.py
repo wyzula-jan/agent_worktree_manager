@@ -301,3 +301,47 @@ def test_rollback_does_not_claim_a_later_branch_with_the_same_name(workspace, mo
     git(repo, "branch", "task")
     lifecycle.delete(project, ["task"], delete_branch=True, force=True)
     assert "task" in git(repo, "branch", "--format=%(refname:short)").splitlines()
+
+
+def snapshot(packages, python="3.13.0"):
+    return {"python": python, "markers": {}, "packages": packages}
+
+
+def package(name, version, direct_url=None):
+    return {
+        "name": name,
+        "version": version,
+        "direct_url": direct_url,
+        "requires": [],
+        "installer": "pip",
+        "metadata_path": None,
+    }
+
+
+def test_shared_editable_version_follows_its_source(workspace, install_package, tmp_path):
+    project, repo = workspace
+    install_package(project.base, repo)
+    shared = install_package(project.base, tmp_path / "shared source", "shared_pkg")
+    backend = shared / "backend.py"
+    backend.write_text(backend.read_text().replace('VERSION = "1.0"', 'VERSION = "2.0"'))
+    record = lifecycle.create(project, "task", [])
+    actual = environments.inspect(Path(record["environments"][0]["path"]))
+    assert {p["name"]: p["version"] for p in actual["packages"]}["shared_pkg"] == "2.0"
+    assert {e["name"]: e["shared"] for e in record["editables"]}["shared_pkg"] is True
+    lifecycle.delete(project, ["task"])
+
+
+def test_pinned_version_drift_is_still_rejected():
+    record = {
+        "base_snapshot": snapshot([package("pinned_pkg", "1.0")]),
+        "install_editables": {},
+        "worktrees": [],
+    }
+    with pytest.raises(AWMError, match=r"drift: pinned-pkg 1\.0 -> 2\.0"):
+        lifecycle.verify_environment(record, snapshot([package("pinned_pkg", "2.0")]))
+
+
+def test_unexpected_package_is_rejected():
+    record = {"base_snapshot": snapshot([]), "install_editables": {}, "worktrees": []}
+    with pytest.raises(AWMError, match="Unexpected package in sandbox: extra-pkg"):
+        lifecycle.verify_environment(record, snapshot([package("extra_pkg", "1.0")]))

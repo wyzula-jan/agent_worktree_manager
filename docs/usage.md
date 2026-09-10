@@ -153,6 +153,12 @@ are not locked; use `awm run` when you need protection for a command's lifetime.
   dependencies and editable destinations, and records failures. A failed attempt
   rolls back safely removable resources it created; changed worktrees are preserved.
   Inspect failures with `awm list --json`; `awm delete` can clear a rolled-back record.
+- Pinned packages must match the base exactly. Editables are reinstalled from their
+  source, so they carry the version that source declares now; a shared editable keeps
+  pointing at the original checkout and therefore stays identical to the base at
+  runtime. `awm doctor` reports editables whose recorded version no longer matches
+  their source, which is metadata in the base gone stale, not a sandbox defect.
+  Reinstall such a package into the base when you want that version recorded.
 - Standard venvs are recreated, not copied. Installed metadata is a snapshot, not
   a portable artifact lockfile: required wheels, indexes, native build tools,
   external libraries and local/VCS sources must remain available. This is local,

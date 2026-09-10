@@ -13,9 +13,15 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 from .errors import AWMError
 from .process import clean_env, run
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 @dataclass
@@ -159,6 +165,41 @@ def editable_path(package: dict) -> Path | None:
     if url.scheme != "file" or url.netloc not in ("", "localhost"):
         raise AWMError(f"Unsupported editable source: {package['name']}")
     return Path(unquote(url.path)).resolve()
+
+
+def stale_editables(snapshot: dict) -> list[tuple[str, str, str, Path]]:
+    """Report editables whose recorded version no longer matches their source.
+
+    A reproduction reinstalls an editable from its source, so the sandbox gets the version
+    that source declares today rather than the one recorded here. Only statically declared
+    versions can be compared without a build; dynamic ones are left alone.
+    """
+    stale = []
+    for package in snapshot["packages"]:
+        source = editable_path(package)
+        if source is None:
+            continue
+        declared = declared_version(source)
+        if declared is None or same_version(declared, package["version"]):
+            continue
+        stale.append((package["name"], package["version"], declared, source))
+    return stale
+
+
+def declared_version(source: Path) -> str | None:
+    try:
+        project = tomllib.loads((source / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = project.get("project", {}).get("version")
+    return version if isinstance(version, str) else None
+
+
+def same_version(left: str, right: str) -> bool:
+    try:
+        return Version(left) == Version(right)
+    except InvalidVersion:
+        return left == right
 
 
 def requirement(package: dict) -> str:

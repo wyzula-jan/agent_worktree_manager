@@ -237,6 +237,11 @@ def cmd_doctor(opts) -> int:
     log(
         f"{project.name}: Git checkouts and {project.backend} base are valid; Python {base['python']}, {len(base['packages'])} packages"
     )
+    for name, recorded, declared, source in environments.stale_editables(base):
+        log(
+            f"Stale editable metadata: {name} records {recorded}, {source} declares {declared}; "
+            f"reinstall it into the base to reproduce that version in new sandboxes"
+        )
     return 0
 
 

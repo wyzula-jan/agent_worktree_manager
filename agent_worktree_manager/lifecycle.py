@@ -267,8 +267,17 @@ def verify_environment(record: dict, actual: dict) -> list[dict]:
             found.add(path)
             extras[name] = requested[path]
             links.append({"name": package["name"], "path": str(path), "shared": not isolated})
-        if not isolated and (name not in before or before[name]["version"] != package["version"]):
-            raise AWMError(f"Installed dependency drift: {name}")
+        if isolated:
+            continue
+        if name not in before:
+            raise AWMError(f"Unexpected package in sandbox: {name}")
+        # A shared editable resolves to the same source directory as the base, so it builds
+        # whatever that source declares now; only pinned packages must match the snapshot.
+        if path is None and before[name]["version"] != package["version"]:
+            raise AWMError(
+                f"Installed dependency drift: {name} "
+                f"{before[name]['version']} -> {package['version']}"
+            )
     if set(before) - set(after):
         raise AWMError(
             f"Packages missing from sandbox: {', '.join(sorted(set(before) - set(after)))}"

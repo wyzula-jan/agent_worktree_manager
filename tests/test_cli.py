@@ -213,3 +213,28 @@ def test_list_reports_env_kind(workspace, tmp_path, capsys):
     assert cli.main(["list", "--root", str(project.root), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["projects"][0]["sandboxes"][0]["environments"][0]["kind"] == "uv"
+
+
+def declare_version(source, version, name="demo_pkg"):
+    pyproject = source / "pyproject.toml"
+    pyproject.write_text(
+        f'{pyproject.read_text()}\n[project]\nname = "{name}"\nversion = "{version}"\n'
+    )
+
+
+def test_doctor_reports_stale_editable_metadata(workspace, install_package, capsys):
+    project, repo = workspace
+    install_package(project.base, repo)
+    declare_version(repo, "2.0")
+    assert cli.main(["doctor", "--root", str(project.root)]) == 0
+    out = capsys.readouterr().out
+    assert "Stale editable metadata: demo_pkg records 1.0" in out
+    assert "declares 2.0" in out
+
+
+def test_doctor_is_quiet_when_editable_metadata_matches(workspace, install_package, capsys):
+    project, repo = workspace
+    install_package(project.base, repo)
+    declare_version(repo, "1.0")
+    assert cli.main(["doctor", "--root", str(project.root)]) == 0
+    assert "Stale editable metadata" not in capsys.readouterr().out
