@@ -25,9 +25,9 @@ def test_activation_validates_resources_and_supports_environment_only_import(wor
     env = make_venv(tmp_path / "owned")
     migration.import_sandbox(project, "task", [], [f"venv={env}"])
     script = lifecycle.prepare_activation(project, "task", "zsh")
-    assert str(env / "bin/activate") in script and str(project.root) in script
-    (env / "bin/activate").unlink()
-    with pytest.raises(AWMError, match="Missing environment activation"):
+    assert str(env) in script and str(project.root) in script
+    (env / "bin/python").unlink()
+    with pytest.raises(AWMError, match="Missing environment interpreter"):
         lifecycle.prepare_activation(project, "task", "zsh")
     lifecycle.delete(project, ["task"])
 
@@ -89,7 +89,7 @@ def test_wrapper_preserves_exit_status_and_cleans_handoff(tmp_path, shell_name):
 
 
 @pytest.mark.parametrize("shell_name", ["bash", "zsh"])
-@pytest.mark.parametrize("kind", ["venv", "uv", "conda"])
+@pytest.mark.parametrize("kind", ["venv", "uv", "conda", "legacy-venv"])
 @pytest.mark.integration
 def test_tui_activates_in_original_shell(make_workspace, tmp_path, monkeypatch, shell_name, kind):
     executable = shutil.which(shell_name)
@@ -103,6 +103,13 @@ def test_tui_activates_in_original_shell(make_workspace, tmp_path, monkeypatch, 
     record = lifecycle.create(project, "task", [])
     env = Path(record["environments"][0]["path"])
     worktree = Path(record["worktrees"][0]["path"])
+    if kind == "legacy-venv":
+        # Reproduce Python 3.11.9's unescaped activation-file interpolation.
+        (env / "bin/activate").write_text(
+            f'export VIRTUAL_ENV="{env}"\nexport PATH="$VIRTUAL_ENV/bin:$PATH"\n'
+        )
+        kind = "venv"
+    original_activation = (env / "bin/activate").read_bytes()
     if kind != "venv":
         if kind == "conda":
             # Activation only needs an existing prefix, without package downloads.
@@ -170,6 +177,7 @@ def test_tui_activates_in_original_shell(make_workspace, tmp_path, monkeypatch, 
     assert not (worktree / "INJECTED").exists()
     assert not list(tmp_path.glob("awm-shell.*"))
     assert env.is_dir()
+    assert (env / "bin/activate").read_bytes() == original_activation
     lifecycle.delete(project, ["task"])
 
 
@@ -186,3 +194,36 @@ def test_conda_rejects_paths_unsafe_for_native_activation(tmp_path):
     env = make_venv(tmp_path / "quote'prefix")
     with pytest.raises(AWMError, match="without quotes"):
         shell.activation_script("conda", env, tmp_path, "zsh")
+
+
+@pytest.mark.parametrize("shell_name", ["bash", "zsh"])
+@pytest.mark.parametrize("disable_prompt", ["", "1"])
+def test_venv_activation_restores_shell_state(tmp_path, shell_name, disable_prompt):
+    executable = shutil.which(shell_name)
+    if not executable:
+        pytest.skip(f"{shell_name} not installed")
+    first = make_venv(tmp_path / "first")
+    second = make_venv(tmp_path / 'second " $NAME `touch INJECTED`')
+    verify = f"import sys; assert sys.prefix == {str(second)!r}"
+    commands = (
+        'saved_path="$PATH"\n'
+        'export PS1="custom prompt> " PYTHONHOME="saved home"\n'
+        f"export VIRTUAL_ENV_DISABLE_PROMPT={shlex.quote(disable_prompt)}\n"
+        f". {shlex.quote(str(first / 'bin/activate'))}\n"
+        "activate_selected() {\n"
+        + shell.activation_script("venv", second, tmp_path, shell_name)
+        + "}\nactivate_selected || exit 1\n"
+        + f"python -c {shlex.quote(verify)} || exit 2\n"
+        + 'if [ -z "$VIRTUAL_ENV_DISABLE_PROMPT" ]; then\n'
+        + '  [ "$PS1" = "(awm) custom prompt> " ] || exit 3\n'
+        + 'else [ "$PS1" = "custom prompt> " ] || exit 4; fi\n'
+        + "deactivate || exit 5\n"
+        + '[ "$PATH" = "$saved_path" ] || exit 6\n'
+        + '[ "$PYTHONHOME" = "saved home" ] || exit 7\n'
+        + '[ "$PS1" = "custom prompt> " ] || exit 8\n'
+        + '[ -z "${VIRTUAL_ENV+x}" ] || exit 9\n'
+        + "if typeset -f deactivate >/dev/null; then exit 10; fi\n"
+    )
+    result = subprocess.run([executable, "-c", commands], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "INJECTED").exists()

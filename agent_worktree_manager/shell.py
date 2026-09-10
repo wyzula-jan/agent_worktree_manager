@@ -61,6 +61,43 @@ def write_handoff(destination: Path, script: str) -> None:
     atomic_text(destination, script)
 
 
+def venv_activation(path: Path) -> str:
+    # Older Python activation files interpolate paths as shell code. Generate
+    # the environment changes ourselves, keeping standard deactivate semantics.
+    return f"""if typeset -f deactivate >/dev/null 2>&1; then deactivate || return; fi
+deactivate() {{
+    if [ "${{_OLD_VIRTUAL_PATH+x}}" = x ]; then
+        export PATH="$_OLD_VIRTUAL_PATH"
+        unset _OLD_VIRTUAL_PATH
+    fi
+    if [ "${{_OLD_VIRTUAL_PYTHONHOME+x}}" = x ]; then
+        export PYTHONHOME="$_OLD_VIRTUAL_PYTHONHOME"
+        unset _OLD_VIRTUAL_PYTHONHOME
+    fi
+    if [ "${{_OLD_VIRTUAL_PS1+x}}" = x ]; then
+        export PS1="$_OLD_VIRTUAL_PS1"
+        unset _OLD_VIRTUAL_PS1
+    fi
+    unset VIRTUAL_ENV VIRTUAL_ENV_PROMPT
+    hash -r 2>/dev/null
+    if [ "${{1:-}}" != nondestructive ]; then unset -f deactivate; fi
+}}
+_OLD_VIRTUAL_PATH="$PATH"
+export VIRTUAL_ENV={shlex.quote(str(path))}
+export PATH="$VIRTUAL_ENV/bin:$PATH"
+export VIRTUAL_ENV_PROMPT=awm
+if [ "${{PYTHONHOME+x}}" = x ]; then
+    _OLD_VIRTUAL_PYTHONHOME="$PYTHONHOME"
+    unset PYTHONHOME
+fi
+if [ -z "${{VIRTUAL_ENV_DISABLE_PROMPT:-}}" ]; then
+    _OLD_VIRTUAL_PS1="${{PS1:-}}"
+    export PS1="(awm) ${{PS1:-}}"
+fi
+hash -r 2>/dev/null
+"""
+
+
 def activation_script(kind: str, path: Path, cwd: Path, shell: str) -> str:
     if shell not in ("bash", "zsh"):
         raise AWMError("Shell integration supports bash and zsh")
@@ -82,8 +119,5 @@ def activation_script(kind: str, path: Path, cwd: Path, shell: str) -> str:
             f"conda activate {shlex.quote(str(path))} || return\n"
         )
     else:
-        script = path / "bin/activate"
-        if not script.is_file():
-            raise AWMError(f"Missing environment activation script: {script}")
-        activate = f". {shlex.quote(str(script))} || return\n"
+        activate = venv_activation(path)
     return activate + f"cd -- {shlex.quote(str(cwd))}\n"

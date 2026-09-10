@@ -129,8 +129,10 @@ Python environment. Bash and Zsh are supported; without the function, `s` displa
 setup instructions and keeps the TUI open.
 
 Press `s` on a sandbox, choose its environment and working directory if there
-are multiple, and AWM closes. Your existing shell then sources the venv/uv
-activation script or runs native `conda activate`, and changes to the worktree.
+are multiple, and AWM closes. Your existing shell then activates the venv/uv
+environment or runs native `conda activate`, and changes to the worktree. AWM generates venv activation
+commands with safely quoted paths, including for environments created by older
+Python versions.
 An environment-only sandbox uses the project root. Esc cancels either picker.
 Your shell process, aliases and customizations stay in place; no child shell is
 started. Use `deactivate` (venv/uv) or `conda deactivate` when finished.
