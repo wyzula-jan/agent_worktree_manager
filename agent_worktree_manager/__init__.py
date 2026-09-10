@@ -1,3 +1,3 @@
-"""agent_worktree_manager — cleanup CLI for clone_worktree_env.sh sandboxes."""
+"""Portable, project-owned worktree environments."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

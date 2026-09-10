@@ -1,25 +1,59 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-worktree-manager"
-version = "0.1.0"
-description = "Delete/list agent sandboxes created by clone_worktree_env.sh (git worktrees + cloned conda envs)"
+version = "0.2.0"
+description = "Manage isolated Python environments and Git worktrees across projects"
+authors = [{name = "Jan Wyzula"}]
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+dependencies = [
+  "packaging>=23",
+  "platformdirs>=3",
+  "pip>=23.1",
+  "tomli>=2; python_version < '3.11'",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console :: Curses",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "build>=1.2", "twine>=5", "ruff>=0.9"]
 
 [project.scripts]
 awm = "agent_worktree_manager.cli:main"
 
 [tool.setuptools]
 packages = ["agent_worktree_manager"]
+include-package-data = false
 
-[tool.black]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: exercises real Git repositories and Python environments", "conda: requires an installed conda executable"]
+
+[tool.ruff]
 line-length = 100
-skip-magic-trailing-comma = true
+target-version = "py310"
 
-[tool.isort]
-line_length = 100
-profile = "black"
-multi_line_output = 3
-include_trailing_comma = true
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
+
+[tool.ruff.lint.isort]
+split-on-trailing-comma = false
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
