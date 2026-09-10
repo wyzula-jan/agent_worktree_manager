@@ -66,6 +66,13 @@ In Codex, select it through `/skills` or mention `$awm`. In Claude Code, use
 `/awm`. For example: “create a sandbox for fixing the login tests and work there.”
 See the [agent guide](docs/agents.md) for custom locations and updating a skill.
 
+## Contributing
+
+Please follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
+for commit messages, for example `feat(tui): add sandbox shell shortcut` or
+`fix(env): preserve editable paths`. These messages drive automated versioning
+and release notes.
+
 ## License
 
 [BSD 3-Clause](LICENSE) — Copyright (c) 2026, Jan Wyzula.
