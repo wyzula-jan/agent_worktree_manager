@@ -333,16 +333,62 @@ def remove_environment(kind: str, path: Path) -> None:
         shutil.rmtree(path)
 
 
-def run_environment(kind: str, path: Path, args: list[str], cwd: Path) -> int:
+def shell_command() -> list[str]:
+    shell = shutil.which(os.environ.get("SHELL") or "/bin/sh")
+    if not shell:
+        raise AWMError("The configured SHELL is unavailable")
+    options = {
+        "bash": ["--noprofile", "--norc", "-i"],
+        "zsh": ["-f", "-i"],
+        "fish": ["--no-config", "-i"],
+        "sh": ["-i"],
+        "dash": ["-i"],
+    }
+    name = Path(shell).name
+    if name not in options:
+        raise AWMError("Set SHELL to bash, zsh, fish, sh or dash to open a sandbox shell")
+    return [shell, *options[name]]
+
+
+def run_environment(
+    kind: str, path: Path, args: list[str], cwd: Path, *, interactive: bool = False
+) -> int:
+    import signal
     import subprocess
 
     env = clean_env()
+    if interactive:
+        # Startup scripts can auto-activate another environment; shells skip them.
+        env.pop("ENV", None)
+        env.pop("BASH_ENV", None)
+        env["PS1"] = "(awm) $ "
     env["PATH"] = str(path / "bin") + os.pathsep + env.get("PATH", "")
     if kind == "conda":
         args = [executable(kind), "run", "--no-capture-output", "--prefix", str(path), *args]
     else:
         env["VIRTUAL_ENV"] = str(path)
     try:
+        if interactive:
+            terminal = sys.stdin.fileno() if sys.stdin.isatty() else None
+            foreground = os.tcgetpgrp(terminal) if terminal is not None else None
+            try:
+                with subprocess.Popen(args, cwd=cwd, env=env) as process:
+                    while True:
+                        try:
+                            return process.wait()
+                        except KeyboardInterrupt:
+                            # Ctrl-C also reaches the foreground shell. Keep its lock
+                            # until it exits, rather than abandoning a live shell.
+                            continue
+            finally:
+                if terminal is not None:
+                    # Interactive shells take foreground ownership for job control.
+                    # Reclaim it before curses reads again, without being stopped.
+                    previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+                    try:
+                        os.tcsetpgrp(terminal, foreground)
+                    finally:
+                        signal.signal(signal.SIGTTOU, previous)
         return subprocess.run(args, cwd=cwd, env=env).returncode
     except OSError as exc:
         raise AWMError(f"Cannot run command: {exc}") from exc

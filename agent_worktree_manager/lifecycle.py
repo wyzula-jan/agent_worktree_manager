@@ -538,21 +538,51 @@ def run_command(
     if not args:
         raise AWMError("Supply a command after --")
     with lock(project.local / "operation.lock", shared=True):
-        record = read_state(project)["sandboxes"].get(name)
-        if record is None or record["status"] not in ("ready", "imported", "partial"):
-            raise AWMError("Sandbox is absent or not ready; inspect it before running commands")
-        targets = [
-            e
-            for e in record["environments"]
-            if environment is None or e["path"] == str(Path(environment).expanduser().resolve())
-        ]
-        worktrees = [w for w in record["worktrees"] if repo is None or w["alias"] == repo]
-        if len(targets) != 1 or len(worktrees) != 1:
-            raise AWMError("Select one worktree with --repo and, for mixed imports, one --env PATH")
-        if not assert_resource(project, targets[0]) or not assert_resource(project, worktrees[0]):
-            raise AWMError("Sandbox resources are missing")
+        target, cwd = execution_target(project, name, repo, environment)
+        return envs.run_environment(target["kind"], Path(target["path"]), args, cwd)
+
+
+def execution_target(
+    project: Project,
+    name: str,
+    repo: str | None,
+    environment: str | None,
+    *,
+    allow_no_worktree: bool = False,
+) -> tuple[dict, Path]:
+    """Resolve owned resources while the caller holds the shared project lock."""
+    record = read_state(project)["sandboxes"].get(name)
+    if record is None or record["status"] not in ("ready", "imported", "partial"):
+        raise AWMError("Sandbox is absent or not ready; inspect it before running commands")
+    targets = [
+        e
+        for e in record["environments"]
+        if environment is None or e["path"] == str(Path(environment).expanduser().resolve())
+    ]
+    worktrees = [w for w in record["worktrees"] if repo is None or w["alias"] == repo]
+    env_only = allow_no_worktree and not record["worktrees"] and repo is None
+    if len(targets) != 1 or (len(worktrees) != 1 and not env_only):
+        raise AWMError("Select one worktree with --repo and, for mixed imports, one --env PATH")
+    if not assert_resource(project, targets[0]) or any(
+        not assert_resource(project, w) for w in worktrees
+    ):
+        raise AWMError("Sandbox resources are missing")
+    return targets[0], Path(worktrees[0]["path"]) if worktrees else project.root
+
+
+def open_shell(
+    project: Project, name: str, repo: str | None = None, environment: str | None = None
+) -> int:
+    with lock(project.local / "operation.lock", shared=True):
+        target, cwd = execution_target(project, name, repo, environment, allow_no_worktree=True)
+        args = envs.shell_command()
+        print(
+            f"[awm] {project.name}/{name}: {target['path']}\n[awm] Working directory: {cwd}\n"
+            "[awm] Activated shell; type exit or Ctrl-D to return to the TUI.",
+            flush=True,
+        )
         return envs.run_environment(
-            targets[0]["kind"], Path(targets[0]["path"]), args, Path(worktrees[0]["path"])
+            target["kind"], Path(target["path"]), args, cwd, interactive=True
         )
 
 

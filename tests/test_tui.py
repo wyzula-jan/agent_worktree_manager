@@ -107,3 +107,43 @@ def test_app_displays_failure_and_shared_source(workspace):
     app.draw()
     assert any("package unavailable" in line for line in screen.lines)
     assert any("shared/source" in line for line in screen.lines)
+
+
+def test_shell_shortcut_keeps_select_all_binding(workspace, tmp_path):
+    import argparse
+
+    project, repo = workspace
+    add_worktree(project, repo)
+    app = tui.App(Screen(), argparse.Namespace(), project, "sandboxes")
+    assert app.handle_key(ord("s")) is None
+    assert "no environment" in app.msg
+    env = make_venv(tmp_path / "owned")
+    migration.import_sandbox(project, "t1", [], [f"venv={env}"])
+    app.sb_items = None
+    assert app.handle_key(ord("s")) == "activate"
+    assert not app.current().selected
+    app.handle_key(ord("a"))
+    assert app.current().selected
+
+
+def test_shell_picker_selects_environment_and_can_cancel(workspace, tmp_path, monkeypatch):
+    import argparse
+
+    project, repo = workspace
+    add_worktree(project, repo)
+    first, second = make_venv(tmp_path / "first"), make_venv(tmp_path / "second")
+    migration.import_sandbox(project, "t1", [], [f"venv={first}", f"uv={second}"])
+    app = tui.App(Screen(), argparse.Namespace(), project, "sandboxes")
+    called = []
+    monkeypatch.setattr(lifecycle, "open_shell", lambda *args: called.append(args) or 0)
+    monkeypatch.setattr(tui.curses, "wrapper", lambda func: func(Screen([ord("j"), 10])))
+    tui.activate_current(app)
+    assert called == [(project, "t1", "demo", str(second))]
+    monkeypatch.setattr(tui.curses, "wrapper", lambda func: func(Screen([tui.ESC])))
+    tui.activate_current(app)
+    assert len(called) == 1
+
+
+def test_shell_picker_selects_working_directory(monkeypatch):
+    monkeypatch.setattr(tui.curses, "wrapper", lambda func: func(Screen([ord("j"), 10])))
+    assert tui.choose_shell_target("Choose working directory", ["first", "second"]) == 1

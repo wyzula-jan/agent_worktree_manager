@@ -102,6 +102,7 @@ for using another base with the same repositories.
 | --- | --- |
 | Arrows / j / k, PgUp / PgDn, g / G | Navigate |
 | Space / a | Select current / all filtered rows |
+| s (sandbox view) | Open a shell in the highlighted sandbox's environment |
 | / | Filter using all entered words |
 | Tab | Switch sandbox/environment views |
 | p | Inspect installed packages and editable source paths |
@@ -115,6 +116,19 @@ Disk sizes load in the background. They describe apparent allocated usage, not
 necessarily bytes reclaimed on copy-on-write filesystems. Nearby venvs and, for
 conda projects, discoverable conda environments can be inspected. Unowned and
 protected environments cannot be selected for deletion; import them explicitly first.
+
+Press `s` on a sandbox to open an activated child shell. If it has multiple
+environments or worktrees, choose the environment and working directory first;
+Esc cancels either picker. An environment-only sandbox opens at the project root.
+Type `exit` or press Ctrl-D to return to the same sandbox view. This activates
+only the child shell; it does not change the terminal that launched AWM.
+
+The shell uses `$SHELL` (bash, zsh, fish, sh or dash; `/bin/sh` when unset), with
+user startup files skipped so they cannot activate a different environment.
+Personal aliases and prompt customizations from those files are not loaded.
+Conda uses its native activation through `conda run`. AWM holds a shared project
+lock for the shell's lifetime, including after Ctrl-C, to prevent concurrent
+sandbox creation/deletion. Exit the shell before performing those operations.
 
 ## Safety and reproduction limits
 

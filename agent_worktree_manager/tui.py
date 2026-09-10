@@ -54,7 +54,7 @@ class PkgOverlay:
 
 
 HELP = {
-    "sandboxes": "[space] toggle  [a] all  [enter] delete  [p] packages  [/] filter  [tab] envs  [q] quit",
+    "sandboxes": "[s] shell  [space] toggle  [a] all  [enter] delete  [p] packages  [/] filter  [tab] envs  [q] quit",
     "envs": "[space] toggle  [a] all  [enter] delete  [p] packages  [/] filter  [tab] sandboxes  [q] quit",
 }
 ENTER_KEYS = (curses.KEY_ENTER, 10, 13)
@@ -245,7 +245,7 @@ class App:
             i.selected = target
 
     def handle_key(self, ch: int) -> str | None:
-        """Returns 'delete' or 'quit' to leave the UI, else None."""
+        """Return a terminal action, or None to keep browsing."""
         view = self.views[self.mode]
         if self.overlay is not None:
             self.overlay_key(ch)
@@ -272,6 +272,14 @@ class App:
             self.toggle_current()
         elif ch == ord("a"):
             self.toggle_all()
+        elif ch == ord("s") and self.mode == "sandboxes":
+            cur = self.current()
+            if cur is None or not cur.envs:
+                self.flash("this sandbox has no environment to activate")
+            elif cur.status not in ("ready", "imported", "partial"):
+                self.flash("this sandbox is not ready; inspect its failure first")
+            else:
+                return "activate"
         elif ch == ord("/"):
             view.editing = True
         elif ch == ord("r"):
@@ -636,6 +644,64 @@ def project_picker(scr) -> str | None:
                 return visible[idx]["id"]
 
 
+def choose_shell_target(title: str, labels: list[str]) -> int | None:
+    if len(labels) == 1:
+        return 0
+
+    def picker(scr):
+        index = 0
+        while True:
+            scr.erase()
+            height, _ = scr.getmaxyx()
+            _safe_add(scr, 0, 1, title, curses.A_BOLD)
+            _safe_add(scr, 1, 1, "[enter] choose  [j/k] navigate  [esc/q] cancel")
+            page = max(1, height - 3)
+            top = max(0, index - page + 1)
+            for row, label in enumerate(labels[top : top + page], start=top):
+                _safe_add(scr, row - top + 2, 1, label, curses.A_REVERSE if row == index else 0)
+            scr.refresh()
+            key = scr.getch()
+            if key in (ESC, ord("q")):
+                return None
+            if key in ENTER_KEYS:
+                return index
+            if key in (curses.KEY_DOWN, ord("j")):
+                index = min(len(labels) - 1, index + 1)
+            elif key in (curses.KEY_UP, ord("k")):
+                index = max(0, index - 1)
+
+    return curses.wrapper(picker)
+
+
+def activate_current(app: App) -> None:
+    item = app.current()
+    if item is None:
+        return
+    record = lifecycle.read_state(app.project)["sandboxes"].get(item.name)
+    if record is None or not record["environments"]:
+        raise AWMError("Sandbox no longer has an environment")
+    environments = record["environments"]
+    index = choose_shell_target(
+        f"Activate {item.name}: choose environment",
+        [f"{e['kind']}  {e['path']}" for e in environments],
+    )
+    if index is None:
+        return
+    environment = environments[index]["path"]
+    repo = None
+    if record["worktrees"]:
+        worktrees = record["worktrees"]
+        index = choose_shell_target(
+            f"Activate {item.name}: choose working directory",
+            [f"{w['alias']}  {w['path']}" for w in worktrees],
+        )
+        if index is None:
+            return
+        repo = worktrees[index]["alias"]
+    code = lifecycle.open_shell(app.project, item.name, repo, environment)
+    app.flash(f"Shell exited ({code}); returned to {item.name}")
+
+
 def run_ui(opts: argparse.Namespace) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise AWMError("Interactive mode requires a TTY")
@@ -654,12 +720,26 @@ def run_ui(opts: argparse.Namespace) -> int:
         holder = {}
 
         def launch(scr, project=project, holder=holder):
-            app = App(scr, opts, project, "envs" if getattr(opts, "envs", False) else "sandboxes")
+            app = holder.get("app")
+            if app is None:
+                app = App(
+                    scr, opts, project, "envs" if getattr(opts, "envs", False) else "sandboxes"
+                )
+            app.scr = scr
             holder["app"] = app
             return app.run()
 
-        result = curses.wrapper(launch)
-        app = holder["app"]
+        while True:
+            result = curses.wrapper(launch)
+            app = holder["app"]
+            if result != "activate":
+                break
+            try:
+                activate_current(app)
+            except (AWMError, OSError) as exc:
+                app.flash(str(exc), seconds=10)
+            app.sb_items, app.env_items = None, None
+            app.env_cache.clear()
         if result == "delete":
             items = app.selected_items()
             if app.mode == "envs":
