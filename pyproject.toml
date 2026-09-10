@@ -41,6 +41,9 @@ awm = "agent_worktree_manager.cli:main"
 packages = ["agent_worktree_manager"]
 include-package-data = false
 
+[tool.setuptools.package-data]
+agent_worktree_manager = ["skills/awm/SKILL.md", "skills/awm/agents/openai.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: exercises real Git repositories and Python environments", "conda: requires an installed conda executable"]

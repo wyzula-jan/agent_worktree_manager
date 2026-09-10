@@ -245,6 +245,15 @@ def cmd_run(opts) -> int:
     return lifecycle.run_command(selected(opts), opts.name, command, opts.repo, opts.env)
 
 
+def cmd_skill(opts) -> int:
+    from .agent_skill import bundled_files, install_skill
+
+    if opts.install:
+        log(f"Skill installed at {install_skill(Path(opts.install))}")
+    else:
+        print(bundled_files()["SKILL.md"].decode("utf-8"), end="")
+    return 0
+
 
 def cmd_ui(opts) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -267,6 +276,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"awm {__version__}")
     parser.set_defaults(func=cmd_ui, envs=False)
     commands = parser.add_subparsers(dest="command")
+    skill = commands.add_parser("skill", help="print or install the bundled coding-agent skill")
+    skill.add_argument("--install", metavar="PATH", help="copy the skill into this skill directory")
+    skill.set_defaults(func=cmd_skill)
     init = commands.add_parser("init", parents=[selectors], help="configure and register a project")
     init.add_argument("--base", required=True, help="existing base environment directory")
     init.add_argument("--backend", choices=BACKENDS, default="venv")

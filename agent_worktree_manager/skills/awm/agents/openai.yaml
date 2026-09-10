@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Worktree Manager"
+  short_description: "Isolated coding worktrees and Python environments"
+  default_prompt: "Use $awm to create an isolated worktree for my coding task and run its tests."
