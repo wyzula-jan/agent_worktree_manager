@@ -324,6 +324,8 @@ def test_shared_editable_version_follows_its_source(workspace, install_package, 
     shared = install_package(project.base, tmp_path / "shared source", "shared_pkg")
     backend = shared / "backend.py"
     backend.write_text(backend.read_text().replace('VERSION = "1.0"', 'VERSION = "2.0"'))
+    # Same-size edits keep stale bytecode valid when both writes share an mtime second.
+    shutil.rmtree(shared / "__pycache__", ignore_errors=True)
     record = lifecycle.create(project, "task", [])
     actual = environments.inspect(Path(record["environments"][0]["path"]))
     assert {p["name"]: p["version"] for p in actual["packages"]}["shared_pkg"] == "2.0"
