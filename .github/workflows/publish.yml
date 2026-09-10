@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
           if [ -z "$(git tag --merged HEAD --list 'v[0-9]*')" ]; then
-            echo '::error::Publish the initial version tag before enabling semantic releases. See docs/releasing.md.'
+            echo '::error::Publish the initial version tag before enabling semantic releases.'
             exit 1
           fi
       - uses: actions/setup-python@v5

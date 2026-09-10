@@ -10,8 +10,9 @@ dependencies and points selected editable packages at new worktrees. Other
 editable packages keep their original source links. Install AWM once, separately
 from your project environments.
 
-Requires Python 3.10+ and Git on macOS or Linux. Standard venv/pip is the default;
-uv and conda backends are optional.
+Supports Python 3.10–3.14 on macOS and Linux; Git is required. Standard venv/pip
+is the default; uv and conda backends are optional. AWM and your project
+environments can use different Python versions.
 
 ## Installation
 
@@ -72,5 +73,4 @@ See the [agent guide](docs/agents.md) for custom locations and updating a skill.
 ## Documentation
 
 [Usage](docs/usage.md) · [Configuration](docs/configuration.md) ·
-[AI agent skill](docs/agents.md) · [Development](docs/development.md) ·
-[Publishing](docs/releasing.md)
+[AI agent skill](docs/agents.md)
