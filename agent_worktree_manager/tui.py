@@ -673,7 +673,7 @@ def choose_shell_target(title: str, labels: list[str]) -> int | None:
     return curses.wrapper(picker)
 
 
-def activate_current(app: App) -> None:
+def activate_current(app: App) -> int | None:
     item = app.current()
     if item is None:
         return
@@ -698,8 +698,7 @@ def activate_current(app: App) -> None:
         if index is None:
             return
         repo = worktrees[index]["alias"]
-    code = lifecycle.open_shell(app.project, item.name, repo, environment)
-    app.flash(f"Shell exited ({code}); returned to {item.name}")
+    return lifecycle.open_shell(app.project, item.name, repo, environment)
 
 
 def run_ui(opts: argparse.Namespace) -> int:
@@ -735,7 +734,9 @@ def run_ui(opts: argparse.Namespace) -> int:
             if result != "activate":
                 break
             try:
-                activate_current(app)
+                code = activate_current(app)
+                if code is not None:
+                    return code
             except (AWMError, OSError) as exc:
                 app.flash(str(exc), seconds=10)
             app.sb_items, app.env_items = None, None

@@ -383,7 +383,7 @@ def run_environment(
             finally:
                 if terminal is not None:
                     # Interactive shells take foreground ownership for job control.
-                    # Reclaim it before curses reads again, without being stopped.
+                    # Restore terminal ownership before unwinding, without being stopped.
                     previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
                     try:
                         os.tcsetpgrp(terminal, foreground)

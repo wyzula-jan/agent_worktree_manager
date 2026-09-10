@@ -117,11 +117,12 @@ necessarily bytes reclaimed on copy-on-write filesystems. Nearby venvs and, for
 conda projects, discoverable conda environments can be inspected. Unowned and
 protected environments cannot be selected for deletion; import them explicitly first.
 
-Press `s` on a sandbox to open an activated child shell. If it has multiple
+Press `s` on a sandbox to leave the TUI and open an activated child shell. If it has multiple
 environments or worktrees, choose the environment and working directory first;
 Esc cancels either picker. An environment-only sandbox opens at the project root.
-Type `exit` or press Ctrl-D to return to the same sandbox view. This activates
-only the child shell; it does not change the terminal that launched AWM.
+Type `exit` or press Ctrl-D to finish AWM and return to your original terminal
+session; the TUI does not reopen. This activates only the child shell, since a
+program cannot change the environment of the shell that launched it.
 
 The shell uses `$SHELL` (bash, zsh, fish, sh or dash; `/bin/sh` when unset), with
 user startup files skipped so they cannot activate a different environment.

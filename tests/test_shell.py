@@ -102,10 +102,12 @@ def test_conda_shell_uses_native_activation_and_waits_through_interrupt(tmp_path
     assert not {"VIRTUAL_ENV", "PYTHONPATH", "ENV"} & observed["env"].keys()
 
 
-@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    "shell, exit_command, exit_code", [("bash", b"\x04", 0), ("zsh", b"exit 7\n", 7)]
+)
 @pytest.mark.integration
-def test_tui_shell_activates_environment_and_returns_to_browser(
-    workspace, tmp_path, monkeypatch, shell
+def test_tui_shell_activates_environment_and_exits_awm(
+    workspace, tmp_path, monkeypatch, shell, exit_command, exit_code
 ):
     executable = shutil.which(shell)
     if not executable:
@@ -164,24 +166,24 @@ def test_tui_shell_activates_environment_and_returns_to_browser(
             str(worktree),
             str(env),
         ]
-        os.write(terminal, b"exit\n")
-        read_until(b"[s] shell")
-        os.write(terminal, b"q")
+        os.write(terminal, exit_command)
+        output = b""
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if select.select([terminal], [], [], 0.05)[0]:
                 try:
-                    os.read(terminal, 65536)
+                    output += os.read(terminal, 65536)
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
             finished, status = os.waitpid(pid, os.WNOHANG)
             if finished:
                 reaped = True
-                assert os.waitstatus_to_exitcode(status) == 0
+                assert os.waitstatus_to_exitcode(status) == exit_code
                 break
             time.sleep(0.05)
-        assert reaped, "TUI did not exit after returning from shell"
+        assert reaped, "AWM did not exit after the shell finished"
+        assert b"[s] shell" not in output, "The TUI reopened after the shell finished"
     finally:
         os.close(terminal)
         if not reaped:

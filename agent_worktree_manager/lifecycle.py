@@ -578,7 +578,7 @@ def open_shell(
         args = envs.shell_command()
         print(
             f"[awm] {project.name}/{name}: {target['path']}\n[awm] Working directory: {cwd}\n"
-            "[awm] Activated shell; type exit or Ctrl-D to return to the TUI.",
+            "[awm] Activated shell; type exit or Ctrl-D to finish and return to your terminal.",
             flush=True,
         )
         return envs.run_environment(

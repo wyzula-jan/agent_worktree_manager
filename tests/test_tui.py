@@ -137,10 +137,10 @@ def test_shell_picker_selects_environment_and_can_cancel(workspace, tmp_path, mo
     called = []
     monkeypatch.setattr(lifecycle, "open_shell", lambda *args: called.append(args) or 0)
     monkeypatch.setattr(tui.curses, "wrapper", lambda func: func(Screen([ord("j"), 10])))
-    tui.activate_current(app)
+    assert tui.activate_current(app) == 0
     assert called == [(project, "t1", "demo", str(second))]
     monkeypatch.setattr(tui.curses, "wrapper", lambda func: func(Screen([tui.ESC])))
-    tui.activate_current(app)
+    assert tui.activate_current(app) is None
     assert len(called) == 1
 
 
