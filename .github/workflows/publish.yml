@@ -1,6 +1,8 @@
-name: Publish to PyPI
+name: Release and publish
 
 on:
+  push:
+    branches: [main]
   release:
     types: [published]
 
@@ -15,17 +17,63 @@ jobs:
   checks:
     uses: ./.github/workflows/ci.yml
 
-  build:
+  version:
     needs: checks
+    if: github.event_name == 'push' && vars.SEMANTIC_RELEASE_ENABLED == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      tag: ${{ steps.release.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.CI_DEPLOY_SSH_KEY }}
+      - name: Use the tested commit and reject a stale run
+        run: |
+          git reset --hard "$GITHUB_SHA"
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo '::error::main changed during CI; the newer run will release it.'
+            exit 1
+          fi
+          if [ -z "$(git tag --merged HEAD --list 'v[0-9]*')" ]; then
+            echo '::error::Publish the initial version tag before enabling semantic releases. See docs/releasing.md.'
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install '.[release]'
+      - name: Calculate version, update changelog and create GitHub release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: semantic-release version
+
+  build:
+    needs: [checks, version]
+    # A manually published first release intentionally skips the version job.
+    if: >-
+      ${{ !cancelled() && needs.checks.result == 'success' &&
+          (github.event_name == 'release' ||
+           (needs.version.result == 'success' && needs.version.outputs.released == 'true')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || needs.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
       - name: Check release version
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           python - <<'PY'
           import os
@@ -40,6 +88,10 @@ jobs:
       - run: python -m pip install build twine
       - run: python -m build
       - run: python -m twine check --strict dist/*
+      - name: Attach the checked distributions to the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
       - uses: actions/upload-artifact@v4
         with:
           name: distributions
@@ -48,6 +100,7 @@ jobs:
 
   publish:
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     environment:
       name: pypi

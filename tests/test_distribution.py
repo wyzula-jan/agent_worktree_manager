@@ -46,6 +46,8 @@ def test_installed_wheel_across_projects_and_uninstallation(tmp_path, monkeypatc
     )
     subprocess.run([str(tool / "bin/python"), "-I", "-c", check], cwd=tmp_path, check=True)
     skill = tmp_path / "installed skill"
+    installed_version = awm("--version").strip()
+    assert installed_version.startswith("awm ")
     exported = awm("skill")
     awm("skill", "--install", str(skill))
     assert (skill / "SKILL.md").read_text() == exported
@@ -88,7 +90,7 @@ def test_installed_wheel_across_projects_and_uninstallation(tmp_path, monkeypatc
         check=True,
         capture_output=True,
     )
-    assert "0.2.0" in awm("--version")
+    assert awm("--version").strip() == installed_version
     subprocess.run(
         [*installer, "uninstall", "--yes", "agent-worktree-manager"],
         check=True,

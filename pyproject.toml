@@ -33,6 +33,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "build>=1.2", "twine>=5", "ruff>=0.9"]
+release = ["python-semantic-release==10.6.2", "build>=1.2", "twine>=5"]
 
 [project.scripts]
 awm = "agent_worktree_manager.cli:main"
@@ -60,3 +61,28 @@ split-on-trailing-comma = false
 
 [tool.ruff.format]
 skip-magic-trailing-comma = true
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+version_variables = ["agent_worktree_manager/__init__.py:__version__"]
+build_command = "python -m build && python -m twine check --strict dist/*"
+commit_message = "chore(release): {version} [skip ci]"
+tag_format = "v{version}"
+allow_zero_version = true
+major_on_zero = false
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "style", "refactor", "test"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+default_bump_level = 0
+
+[tool.semantic_release.remote]
+name = "origin"
+type = "github"
+ignore_token_for_push = true
+token = { env = "GH_TOKEN" }
