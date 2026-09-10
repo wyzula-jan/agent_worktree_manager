@@ -5,17 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import tomllib
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 from .errors import AWMError
 from .git import check_repo

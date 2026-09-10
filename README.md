@@ -10,7 +10,7 @@ dependencies and points selected editable packages at new worktrees. Other
 editable packages keep their original source links. Install AWM once, separately
 from your project environments.
 
-Supports Python 3.10–3.14 on macOS and Linux; Git is required. Standard venv/pip
+Supports Python 3.11–3.14 on macOS and Linux; Git is required. Standard venv/pip
 is the default; uv and conda backends are optional. AWM and your project
 environments can use different Python versions.
 

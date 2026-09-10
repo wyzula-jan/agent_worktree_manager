@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -17,11 +18,6 @@ from packaging.version import InvalidVersion, Version
 
 from .errors import AWMError
 from .process import clean_env, run
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10
-    import tomli as tomllib
 
 
 @dataclass

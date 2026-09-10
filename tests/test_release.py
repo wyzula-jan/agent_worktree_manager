@@ -4,13 +4,12 @@ import json
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 from conftest import git, make_repo
 from packaging.version import Version
-
-from agent_worktree_manager.config import tomllib
 
 pytest.importorskip("semantic_release", reason="Install .[release] for release integration checks")
 
