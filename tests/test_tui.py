@@ -135,10 +135,17 @@ def test_shell_picker_selects_environment_and_can_cancel(workspace, tmp_path, mo
     migration.import_sandbox(project, "t1", [], [f"venv={first}", f"uv={second}"])
     app = tui.App(Screen(), argparse.Namespace(), project, "sandboxes")
     called = []
-    monkeypatch.setattr(lifecycle, "open_shell", lambda *args: called.append(args) or 0)
+    handoff = tmp_path / "handoff"
+    handoff.mkdir(mode=0o700)
+    monkeypatch.setenv("AWM_SHELL_HANDOFF", str(handoff / "activate"))
+    monkeypatch.setenv("AWM_SHELL", "zsh")
+    monkeypatch.setattr(
+        lifecycle, "prepare_activation", lambda *args: called.append(args) or "# activation\n"
+    )
     monkeypatch.setattr(tui.curses, "wrapper", lambda func: func(Screen([ord("j"), 10])))
     assert tui.activate_current(app) == 0
-    assert called == [(project, "t1", "demo", str(second))]
+    assert called == [(project, "t1", "zsh", "demo", str(second))]
+    assert (handoff / "activate").read_text() == "# activation\n"
     monkeypatch.setattr(tui.curses, "wrapper", lambda func: func(Screen([tui.ESC])))
     assert tui.activate_current(app) is None
     assert len(called) == 1

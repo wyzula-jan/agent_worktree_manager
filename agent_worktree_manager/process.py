@@ -12,7 +12,15 @@ from .errors import AWMError
 
 def clean_env() -> dict[str, str]:
     env = os.environ.copy()
-    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV"):
+    for key in (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV",
+        "AWM_SHELL",
+        "AWM_SHELL_HANDOFF",
+    ):
         env.pop(key, None)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return env

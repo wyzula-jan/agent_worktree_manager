@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from . import cli, lifecycle, registry
+from . import cli, lifecycle, registry, shell
 from .config import Project
 from .environments import Env
 from .errors import AWMError
@@ -54,7 +54,7 @@ class PkgOverlay:
 
 
 HELP = {
-    "sandboxes": "[s] shell  [space] toggle  [a] all  [enter] delete  [p] packages  [/] filter  [tab] envs  [q] quit",
+    "sandboxes": "[s] activate  [space] toggle  [a] all  [enter] delete  [p] packages  [/] filter  [tab] envs  [q] quit",
     "envs": "[space] toggle  [a] all  [enter] delete  [p] packages  [/] filter  [tab] sandboxes  [q] quit",
 }
 ENTER_KEYS = (curses.KEY_ENTER, 10, 13)
@@ -674,6 +674,7 @@ def choose_shell_target(title: str, labels: list[str]) -> int | None:
 
 
 def activate_current(app: App) -> int | None:
+    destination, shell_name = shell.handoff_target()
     item = app.current()
     if item is None:
         return
@@ -698,7 +699,9 @@ def activate_current(app: App) -> int | None:
         if index is None:
             return
         repo = worktrees[index]["alias"]
-    return lifecycle.open_shell(app.project, item.name, repo, environment)
+    script = lifecycle.prepare_activation(app.project, item.name, shell_name, repo, environment)
+    shell.write_handoff(destination, script)
+    return 0
 
 
 def run_ui(opts: argparse.Namespace) -> int:

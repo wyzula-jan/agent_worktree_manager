@@ -24,6 +24,7 @@ from .git import (
     worktrees_of,
 )
 from .registry import entries, protected_paths, registry_lock
+from .shell import activation_script
 from .storage import identity, lock, read_json, write_json
 
 
@@ -570,20 +571,12 @@ def execution_target(
     return targets[0], Path(worktrees[0]["path"]) if worktrees else project.root
 
 
-def open_shell(
-    project: Project, name: str, repo: str | None = None, environment: str | None = None
-) -> int:
+def prepare_activation(
+    project: Project, name: str, shell: str, repo: str | None = None, environment: str | None = None
+) -> str:
     with lock(project.local / "operation.lock", shared=True):
         target, cwd = execution_target(project, name, repo, environment, allow_no_worktree=True)
-        args = envs.shell_command()
-        print(
-            f"[awm] {project.name}/{name}: {target['path']}\n[awm] Working directory: {cwd}\n"
-            "[awm] Activated shell; type exit or Ctrl-D to finish and return to your terminal.",
-            flush=True,
-        )
-        return envs.run_environment(
-            target["kind"], Path(target["path"]), args, cwd, interactive=True
-        )
+        return activation_script(target["kind"], Path(target["path"]), cwd, shell)
 
 
 def project_summary(project: Project) -> dict:

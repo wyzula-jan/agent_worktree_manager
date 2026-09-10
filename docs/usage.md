@@ -102,7 +102,7 @@ for using another base with the same repositories.
 | --- | --- |
 | Arrows / j / k, PgUp / PgDn, g / G | Navigate |
 | Space / a | Select current / all filtered rows |
-| s (sandbox view) | Open a shell in the highlighted sandbox's environment |
+| s (sandbox view) | Close AWM and activate the environment in your current shell |
 | / | Filter using all entered words |
 | Tab | Switch sandbox/environment views |
 | p | Inspect installed packages and editable source paths |
@@ -117,19 +117,28 @@ necessarily bytes reclaimed on copy-on-write filesystems. Nearby venvs and, for
 conda projects, discoverable conda environments can be inspected. Unowned and
 protected environments cannot be selected for deletion; import them explicitly first.
 
-Press `s` on a sandbox to leave the TUI and open an activated child shell. If it has multiple
-environments or worktrees, choose the environment and working directory first;
-Esc cancels either picker. An environment-only sandbox opens at the project root.
-Type `exit` or press Ctrl-D to finish AWM and return to your original terminal
-session; the TUI does not reopen. This activates only the child shell, since a
-program cannot change the environment of the shell that launched it.
+Enable current-shell activation once in your terminal:
 
-The shell uses `$SHELL` (bash, zsh, fish, sh or dash; `/bin/sh` when unset), with
-user startup files skipped so they cannot activate a different environment.
-Personal aliases and prompt customizations from those files are not loaded.
-Conda uses its native activation through `conda run`. AWM holds a shared project
-lock for the shell's lifetime, including after Ctrl-C, to prevent concurrent
-sandbox creation/deletion. Exit the shell before performing those operations.
+```sh
+eval "$(awm shell-init zsh)"  # or: eval "$(awm shell-init bash)"
+```
+
+Add that line to `~/.zshrc` or `~/.bashrc` to enable it for future terminals.
+The function runs the installed AWM interpreter, independently of the project's
+Python environment. Bash and Zsh are supported; without the function, `s` displays
+setup instructions and keeps the TUI open.
+
+Press `s` on a sandbox, choose its environment and working directory if there
+are multiple, and AWM closes. Your existing shell then sources the venv/uv
+activation script or runs native `conda activate`, and changes to the worktree.
+An environment-only sandbox uses the project root. Esc cancels either picker.
+Your shell process, aliases and customizations stay in place; no child shell is
+started. Use `deactivate` (venv/uv) or `conda deactivate` when finished.
+
+AWM validates ownership before the handoff, then exits and releases its lock.
+The active environment is protected from deletion by AWM commands launched from
+that shell. Other terminal sessions do not inherit its active environment and
+are not locked; use `awm run` when you need protection for a command's lifetime.
 
 ## Safety and reproduction limits
 

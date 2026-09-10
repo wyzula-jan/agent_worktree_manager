@@ -255,6 +255,13 @@ def cmd_skill(opts) -> int:
     return 0
 
 
+def cmd_shell_init(opts) -> int:
+    from .shell import shell_init
+
+    print(shell_init(opts.shell), end="")
+    return 0
+
+
 def cmd_ui(opts) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise AWMError("Interactive mode requires a TTY; use 'awm projects list' or 'awm list'")
@@ -276,6 +283,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"awm {__version__}")
     parser.set_defaults(func=cmd_ui, envs=False)
     commands = parser.add_subparsers(dest="command")
+    shell = commands.add_parser("shell-init", help="print current-shell integration for eval")
+    shell.add_argument("shell", choices=("bash", "zsh"))
+    shell.set_defaults(func=cmd_shell_init)
     skill = commands.add_parser("skill", help="print or install the bundled coding-agent skill")
     skill.add_argument("--install", metavar="PATH", help="copy the skill into this skill directory")
     skill.set_defaults(func=cmd_skill)

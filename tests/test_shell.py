@@ -1,54 +1,51 @@
-"""Sandbox shells keep the selected interpreter and the lifecycle lock."""
+"""Activation happens in the invoking shell after the TUI has exited."""
 
 import errno
 import json
 import os
 import pty
 import select
+import shlex
 import shutil
 import signal
 import subprocess
-import sys
 import time
 from pathlib import Path
 
 import pytest
 from conftest import make_venv
 
-from agent_worktree_manager import environments, lifecycle, migration
+from agent_worktree_manager import lifecycle, migration, shell
 from agent_worktree_manager.errors import AWMError
+from agent_worktree_manager.process import run
 
 
-def test_shell_holds_lock_and_supports_environment_only_import(workspace, tmp_path, monkeypatch):
+def test_activation_validates_resources_and_supports_environment_only_import(workspace, tmp_path):
     project, _ = workspace
     env = make_venv(tmp_path / "owned")
     migration.import_sandbox(project, "task", [], [f"venv={env}"])
-    monkeypatch.setenv("SHELL", "/bin/bash")
-
-    def run(kind, target, args, cwd, *, interactive):
-        assert (kind, target, cwd, interactive) == ("venv", env, project.root, True)
-        assert args[1:] == ["--noprofile", "--norc", "-i"]
-        with pytest.raises(AWMError, match="busy"):
-            lifecycle.delete(project, ["task"])
-        return 0
-
-    monkeypatch.setattr(environments, "run_environment", run)
-    assert lifecycle.open_shell(project, "task") == 0
+    script = lifecycle.prepare_activation(project, "task", "zsh")
+    assert str(env / "bin/activate") in script and str(project.root) in script
+    (env / "bin/activate").unlink()
+    with pytest.raises(AWMError, match="Missing environment activation"):
+        lifecycle.prepare_activation(project, "task", "zsh")
     lifecycle.delete(project, ["task"])
 
 
-def test_shell_requires_explicit_environment_and_rejects_missing_resources(workspace, tmp_path):
+def test_activation_requires_explicit_environment_and_rejects_missing_resources(
+    workspace, tmp_path
+):
     project, _ = workspace
     first, second = make_venv(tmp_path / "first"), make_venv(tmp_path / "second")
     migration.import_sandbox(project, "task", [], [f"venv={first}", f"uv={second}"])
     with pytest.raises(AWMError, match="Select one"):
-        lifecycle.open_shell(project, "task")
+        lifecycle.prepare_activation(project, "task", "bash")
     shutil.rmtree(second)
     with pytest.raises(AWMError, match="missing"):
-        lifecycle.open_shell(project, "task", environment=str(second))
+        lifecycle.prepare_activation(project, "task", "bash", environment=str(second))
 
 
-def test_shell_rejects_failed_sandbox(workspace):
+def test_activation_rejects_failed_sandbox(workspace):
     project, _ = workspace
     state = lifecycle.read_state(project)
     record = lifecycle.sandbox_record("failed")
@@ -56,119 +53,95 @@ def test_shell_rejects_failed_sandbox(workspace):
     state["sandboxes"]["failed"] = record
     lifecycle.save_state(project, state)
     with pytest.raises(AWMError, match="not ready"):
-        lifecycle.open_shell(project, "failed")
+        lifecycle.prepare_activation(project, "failed", "zsh")
 
 
-def test_conda_shell_uses_native_activation_and_waits_through_interrupt(tmp_path, monkeypatch):
-    observed = {}
-    monkeypatch.setattr(environments, "executable", lambda kind: "/conda")
-    monkeypatch.setenv("VIRTUAL_ENV", "/unrelated")
-    monkeypatch.setenv("PYTHONPATH", "/unrelated")
-    monkeypatch.setenv("ENV", "/unrelated/init")
-
-    class Process:
-        def __init__(self, args, **kwargs):
-            observed.update(args=args, **kwargs)
-            self.waits = 0
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-        def wait(self):
-            self.waits += 1
-            if self.waits == 1:
-                raise KeyboardInterrupt
-            return 0
-
-    monkeypatch.setattr(subprocess, "Popen", Process)
-    assert (
-        environments.run_environment(
-            "conda", tmp_path, ["/bin/bash", "-i"], tmp_path, interactive=True
-        )
-        == 0
-    )
-    assert observed["args"] == [
-        "/conda",
-        "run",
-        "--no-capture-output",
-        "--prefix",
-        str(tmp_path),
-        "/bin/bash",
-        "-i",
-    ]
-    assert not {"VIRTUAL_ENV", "PYTHONPATH", "ENV"} & observed["env"].keys()
+def test_handoff_requires_shell_integration_and_private_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("AWM_SHELL_HANDOFF", raising=False)
+    with pytest.raises(AWMError, match="shell-init"):
+        shell.handoff_target()
+    destination = tmp_path / "handoff"
+    destination.mkdir(mode=0o755)
+    with pytest.raises(AWMError, match="private"):
+        shell.write_handoff(destination / "activate", "# script")
+    destination.chmod(0o700)
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_text("unchanged")
+    (destination / "activate").symlink_to(unrelated)
+    with pytest.raises(AWMError, match="symlink"):
+        shell.write_handoff(destination / "activate", "# script")
+    assert unrelated.read_text() == "unchanged"
 
 
-@pytest.mark.parametrize(
-    "shell, exit_command, exit_code", [("bash", b"\x04", 0), ("zsh", b"exit 7\n", 7)]
-)
-@pytest.mark.integration
-def test_tui_shell_activates_environment_and_exits_awm(
-    workspace, tmp_path, monkeypatch, shell, exit_command, exit_code
-):
-    executable = shutil.which(shell)
+@pytest.mark.parametrize("shell_name", ["bash", "zsh"])
+def test_wrapper_preserves_exit_status_and_cleans_handoff(tmp_path, shell_name):
+    executable = shutil.which(shell_name)
     if not executable:
-        pytest.skip(f"{shell} not installed")
-    project, _ = workspace
+        pytest.skip(f"{shell_name} not installed")
+    result = subprocess.run(
+        [executable, "-c", shell.shell_init(shell_name) + "\nawm --invalid; exit $?"],
+        env={**os.environ, "TMPDIR": str(tmp_path)},
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 2, result.stderr
+    assert not list(tmp_path.glob("awm-shell.*"))
+
+
+@pytest.mark.parametrize("shell_name", ["bash", "zsh"])
+@pytest.mark.parametrize("kind", ["venv", "uv", "conda"])
+@pytest.mark.integration
+def test_tui_activates_in_original_shell(make_workspace, tmp_path, monkeypatch, shell_name, kind):
+    executable = shutil.which(shell_name)
+    if not executable:
+        pytest.skip(f"{shell_name} not installed")
+    if kind == "conda" and not (os.environ.get("CONDA_EXE") or shutil.which("conda")):
+        pytest.skip("conda not installed")
+    project, _ = make_workspace(
+        "project with spaces" if kind == "conda" else "project ' $(touch INJECTED) ;"
+    )
     record = lifecycle.create(project, "task", [])
     env = Path(record["environments"][0]["path"])
     worktree = Path(record["worktrees"][0]["path"])
-    startup = tmp_path / "shell startup"
-    startup.mkdir()
-    (startup / ".zshrc").write_text("export PATH=/wrong-environment\n")
-    monkeypatch.setenv("SHELL", executable)
-    monkeypatch.setenv("ZDOTDIR", str(startup))
-    monkeypatch.setenv("ENV", str(startup / ".zshrc"))
+    if kind != "venv":
+        if kind == "conda":
+            # Activation only needs an existing prefix, without package downloads.
+            (env / "conda-meta").mkdir()
+            (env / "conda-meta/history").touch()
+        state = lifecycle.read_state(project)
+        state["sandboxes"]["task"]["environments"][0]["kind"] = kind
+        lifecycle.save_state(project, state)
+    result_file = tmp_path / "result.json"
+    capture = (
+        "import json,sys,os; from pathlib import Path; "
+        f"Path({str(result_file)!r}).write_text(json.dumps([sys.prefix,os.getcwd(),"
+        "os.getppid(),os.environ.get('VIRTUAL_ENV'),os.environ.get('CONDA_PREFIX')]))"
+    )
+    startup = (
+        shell.shell_init(shell_name)
+        + "\n_awm_original_level=$SHLVL\n"
+        + 'alias awm_test_alias="printf alias-preserved"\n'
+        + f"awm --project {project.id} || exit 91\n"
+        + '[ "$SHLVL" = "$_awm_original_level" ] || exit 92\n'
+        + "alias awm_test_alias >/dev/null || exit 93\n"
+        + f"python -c {shlex.quote(capture)} || exit 94\n"
+        + "awm --version || exit 95\n"
+        + f"if awm --project {project.id} delete task --yes; then exit 96; fi\n"
+        + ("conda deactivate\n" if kind == "conda" else "deactivate\n")
+        + "exit 0\n"
+    )
     monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("SHELL", "/not-the-running-shell")
+    options = ["--noprofile", "--norc"] if shell_name == "bash" else ["-f"]
     pid, terminal = pty.fork()
     if pid == 0:
-        os.execv(
-            sys.executable,
-            [sys.executable, "-m", "agent_worktree_manager", "--project", project.id],
-        )
+        os.execv(executable, [executable, *options, "-i", "-c", startup])
     reaped = False
-
-    def read_until(marker):
-        output = b""
-        deadline = time.monotonic() + 15
-        while marker not in output and time.monotonic() < deadline:
-            if select.select([terminal], [], [], 0.1)[0]:
-                try:
-                    chunk = os.read(terminal, 65536)
-                except OSError as exc:
-                    if exc.errno != errno.EIO:
-                        raise
-                    break
-                if not chunk:
-                    break
-                output += chunk
-        assert marker in output, output.decode(errors="replace")
-
+    output = b""
     try:
-        read_until(b"[s] shell")
-        os.write(terminal, b"s")
-        read_until(b"(awm) $ ")
-        os.write(terminal, b"\x03")
-        read_until(b"(awm) $ ")
-        with pytest.raises(AWMError, match="busy"):
-            lifecycle.delete(project, ["task"])
-        command = (
-            "python -c 'import json,sys,os; from pathlib import Path; "
-            'Path("shell-result.json").write_text(json.dumps([sys.prefix,os.getcwd(),os.environ.get("VIRTUAL_ENV")]))\'\n'
-        )
-        os.write(terminal, command.encode())
-        read_until(b"(awm) $ ")
-        assert json.loads((worktree / "shell-result.json").read_text()) == [
-            str(env),
-            str(worktree),
-            str(env),
-        ]
-        os.write(terminal, exit_command)
-        output = b""
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + 30
+        selected = False
         while time.monotonic() < deadline:
             if select.select([terminal], [], [], 0.05)[0]:
                 try:
@@ -176,18 +149,40 @@ def test_tui_shell_activates_environment_and_exits_awm(
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
+            if not selected and b"[s] activate" in output:
+                os.write(terminal, b"s")
+                selected = True
             finished, status = os.waitpid(pid, os.WNOHANG)
             if finished:
                 reaped = True
-                assert os.waitstatus_to_exitcode(status) == exit_code
+                assert os.waitstatus_to_exitcode(status) == 0, output.decode(errors="replace")
                 break
-            time.sleep(0.05)
-        assert reaped, "AWM did not exit after the shell finished"
-        assert b"[s] shell" not in output, "The TUI reopened after the shell finished"
+        assert reaped, output.decode(errors="replace")
+        assert selected
     finally:
         os.close(terminal)
         if not reaped:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
-    (worktree / "shell-result.json").unlink()
+    result = json.loads(result_file.read_text())
+    assert result[:3] == [str(env), str(worktree), pid]
+    assert result[4 if kind == "conda" else 3] == str(env)
+    assert not (worktree / "INJECTED").exists()
+    assert not list(tmp_path.glob("awm-shell.*"))
+    assert env.is_dir()
     lifecycle.delete(project, ["task"])
+
+
+def test_handoff_is_not_inherited_by_project_commands(monkeypatch):
+    import sys
+
+    monkeypatch.setenv("AWM_SHELL_HANDOFF", "/parent/handoff")
+    monkeypatch.setenv("AWM_SHELL", "zsh")
+    result = run([sys.executable, "-c", "import os; assert 'AWM_SHELL_HANDOFF' not in os.environ"])
+    assert result.returncode == 0
+
+
+def test_conda_rejects_paths_unsafe_for_native_activation(tmp_path):
+    env = make_venv(tmp_path / "quote'prefix")
+    with pytest.raises(AWMError, match="without quotes"):
+        shell.activation_script("conda", env, tmp_path, "zsh")

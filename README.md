@@ -32,6 +32,15 @@ uv tool install --editable .
 python -m pip install -e .
 ```
 
+To activate a sandbox in your current terminal from the TUI, enable shell integration:
+
+```sh
+eval "$(awm shell-init zsh)"  # use bash for Bash
+```
+
+Add the same line to `~/.zshrc` (or `~/.bashrc`) to enable it in new terminals.
+Then press `s` on a sandbox to close AWM and activate its environment.
+
 ## Register your first project
 
 From your project's Git checkout, register its existing Python environment:
