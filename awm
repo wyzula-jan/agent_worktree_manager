@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone launcher so the CLI works without pip-installing the package."""
+"""Source-checkout launcher; the interpreter must have the project dependencies installed."""
 import os
 import sys
 

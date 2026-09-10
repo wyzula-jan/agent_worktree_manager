@@ -1,411 +1,37 @@
-"""Interactive curses UI for awm.
-
-Two modes, switched with Tab at any time (or chosen at launch: ``awm ui`` /
-``awm envs``):
-
-* sandboxes — every clone_worktree_env.sh sandbox with its worktrees and envs.
-  Check/uncheck and delete through the same plan/confirm pipeline as
-  ``awm delete``, so all its safety rules still apply.
-* envs — every uv venv under the venv home and every conda env on the machine,
-  with python version, disk size, last change and sandbox link. ``p`` lists the
-  packages installed in the env (importlib.metadata run with the env's own
-  interpreter, so it also works for uv venvs without pip) behind a live
-  grep-style filter. Check/uncheck and delete envs.
-
-Base envs, the conda root and the env awm itself runs in are protected and
-cannot be selected in envs mode.
-"""
+"""Curses project overview and sandbox/environment views."""
 
 from __future__ import annotations
 
 import argparse
 import curses
-import json
 import os
-import re
-import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
-from agent_worktree_manager import cli
+from . import cli, lifecycle, registry
+from .config import Project
+from .environments import Env
+from .errors import AWMError
+from .inspection import (
+    SIZES,
+    EnvItem,
+    Item,
+    Pkg,
+    SizeWorker,
+    _matches,
+    gather,
+    gather_envs,
+    human_age,
+    human_size,
+    list_packages,
+    make_env_item,
+)
 
 MODES = ("sandboxes", "envs")
 
 
-# ---------------------------------------------------------------------------
-# Disk sizes: shared cache + background du worker that serves the cursor first
-# ---------------------------------------------------------------------------
-SIZES: dict[str, int | None] = {}
-
-
-def _du_kb(path: str | Path) -> int | None:
-    r = subprocess.run(["du", "-sk", str(path)], capture_output=True, text=True)
-    try:
-        return int(r.stdout.split()[0])
-    except (IndexError, ValueError):
-        return None
-
-
-class SizeWorker:
-    def __init__(self) -> None:
-        self._queue: list[str] = []
-        self._priority: str | None = None
-        self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-
-    def add(self, paths) -> None:
-        with self._lock:
-            for p in paths:
-                p = str(p)
-                if p not in SIZES and p not in self._queue:
-                    self._queue.append(p)
-            if self._queue and (self._thread is None or not self._thread.is_alive()):
-                self._thread = threading.Thread(target=self._run, daemon=True)
-                self._thread.start()
-
-    def prioritize(self, path: str | Path | None) -> None:
-        with self._lock:
-            self._priority = str(path) if path else None
-
-    def _next(self) -> str | None:
-        with self._lock:
-            if self._priority in self._queue:
-                p = self._priority
-                self._queue.remove(p)
-                return p
-            if self._queue:
-                return self._queue.pop(0)
-            self._thread = None
-            return None
-
-    def _run(self) -> None:
-        while (p := self._next()) is not None:
-            SIZES[p] = _du_kb(p)
-
-
-# ---------------------------------------------------------------------------
-# Formatting helpers
-# ---------------------------------------------------------------------------
-def human_age(ts: float) -> str:
-    delta = max(0, time.time() - ts)
-    for unit, sec in (("y", 31536000), ("mo", 2592000), ("w", 604800), ("d", 86400), ("h", 3600)):
-        if delta >= sec:
-            return f"{int(delta // sec)}{unit}"
-    return "<1h"
-
-
-def human_size(kb: int | None) -> str:
-    if kb is None:
-        return "…"
-    if kb >= 1 << 20:
-        return f"{kb / (1 << 20):.1f}G"
-    if kb >= 1 << 10:
-        return f"{kb / (1 << 10):.0f}M"
-    return f"{kb}K"
-
-
-def _matches(text: str, query: str) -> bool:
-    """grep-style: every whitespace-separated term must occur (case-insensitive)."""
-    t = text.lower()
-    return all(term in t for term in query.lower().split())
-
-
-# ---------------------------------------------------------------------------
-# Sandbox metadata
-# ---------------------------------------------------------------------------
-@dataclass
-class WtInfo:
-    wt: cli.Worktree
-    dirty: int = 0
-    last_age: str = "?"
-    last_subject: str = ""
-    unpushed: str = ""
-
-    @property
-    def size_kb(self) -> int | None:
-        return SIZES.get(str(self.wt.path))
-
-
-@dataclass
-class Item:
-    name: str
-    envs: list = field(default_factory=list)  # list[cli.Env]
-    wts: list[WtInfo] = field(default_factory=list)
-    selected: bool = False
-
-    @property
-    def dirty(self) -> bool:
-        return any(w.dirty for w in self.wts)
-
-    @property
-    def env_size_kb(self) -> int | None:
-        sizes = [SIZES.get(e.path) for e in self.envs]
-        return sum(filter(None, sizes)) if any(s is not None for s in sizes) else None
-
-    @property
-    def total_kb(self) -> int:
-        return sum(filter(None, [self.env_size_kb, *(w.size_kb for w in self.wts)]))
-
-    @property
-    def sizes_pending(self) -> bool:
-        return any(e.path not in SIZES for e in self.envs) or any(
-            str(w.wt.path) not in SIZES for w in self.wts if not w.wt.prunable
-        )
-
-    @property
-    def filter_text(self) -> str:
-        return " ".join(
-            [self.name, *(e.name for e in self.envs)]
-            + [f"{w.wt.repo.name} {w.wt.branch or ''}" for w in self.wts]
-        )
-
-
-def wt_info(wt: cli.Worktree) -> WtInfo:
-    info = WtInfo(wt=wt)
-    if wt.prunable:
-        info.last_subject = "(directory missing)"
-        return info
-    r = cli.git(wt.path, "status", "--porcelain")
-    if r.returncode == 0:
-        info.dirty = len([line for line in r.stdout.splitlines() if line.strip()])
-    r = cli.git(wt.path, "log", "-1", "--format=%ct%x00%s")
-    if r.returncode == 0 and r.stdout.strip():
-        ts, _, subject = r.stdout.strip().partition("\x00")
-        try:
-            info.last_age = human_age(int(ts))
-        except ValueError:
-            pass
-        info.last_subject = subject
-    r = cli.git(wt.path, "rev-list", "--count", "@{upstream}..HEAD")
-    if r.returncode == 0:
-        n = int(r.stdout.strip() or 0)
-        info.unpushed = f"{n} unpushed" if n else "pushed"
-    else:
-        info.unpushed = "no upstream"
-    return info
-
-
-def gather(
-    root: Path, base_env: str, conda_base_env: str, venv_home: Path
-) -> tuple[list[Item], str | None]:
-    """All sandboxes under *root* with per-worktree metadata, plus the conda exe."""
-    items: dict[str, Item] = {}
-    for repo in cli.find_repos(root):
-        prefix = f"{repo.name}_"
-        for wt in cli.worktrees_of(repo):
-            if wt.path.name.startswith(prefix) and len(wt.path.name) > len(prefix):
-                name = wt.path.name[len(prefix) :]
-                items.setdefault(name, Item(name=name)).wts.append(wt_info(wt))
-
-    conda = cli.find_conda()
-    sources = (
-        (cli.uv_envs(venv_home), "uv", f"{base_env}_"),
-        (cli.conda_envs(conda) if conda else {}, "conda", f"{conda_base_env}_"),
-    )
-    for env_map, kind, env_prefix in sources:
-        for env_name, path in env_map.items():
-            if env_name.startswith(env_prefix) and len(env_name) > len(env_prefix):
-                name = env_name[len(env_prefix) :]
-                item = items.setdefault(name, Item(name=name))
-                item.envs.append(cli.Env(name=env_name, path=path, kind=kind))
-
-    return [items[k] for k in sorted(items)], conda
-
-
-# ---------------------------------------------------------------------------
-# Environment metadata (all uv venvs + all conda envs)
-# ---------------------------------------------------------------------------
-@dataclass
-class Pkg:
-    name: str
-    version: str
-    editable: str | None  # source dir for editable installs
-
-    @property
-    def filter_text(self) -> str:
-        return f"{self.name} {self.version} {self.editable or ''}"
-
-
-@dataclass
-class EnvItem:
-    env: cli.Env
-    python: str = "?"
-    sandbox: str | None = None  # sandbox name if this is a <base>_<name> clone
-    protected: str | None = None  # reason it cannot be deleted, else None
-    changed: float | None = None  # last modification timestamp
-    selected: bool = False
-    pkgs: list[Pkg] | None = None  # loaded on demand
-    pkgs_error: str | None = None
-    pkgs_loading: bool = False
-
-    @property
-    def name(self) -> str:
-        return self.env.name
-
-    @property
-    def size_kb(self) -> int | None:
-        return SIZES.get(self.env.path)
-
-    @property
-    def interpreter(self) -> str:
-        return str(Path(self.env.path) / "bin" / "python")
-
-    @property
-    def filter_text(self) -> str:
-        return f"{self.name} {self.env.kind} {self.python} {self.sandbox or ''}"
-
-
-def python_version_of(path: str | Path) -> str:
-    p = Path(path)
-    cfg = p / "pyvenv.cfg"
-    if cfg.is_file():
-        try:
-            for line in cfg.read_text(errors="replace").splitlines():
-                key, _, val = line.partition("=")
-                if key.strip() in ("version_info", "version") and val.strip():
-                    return val.strip()
-        except OSError:
-            pass
-    meta = p / "conda-meta"
-    if meta.is_dir():
-        for f in meta.glob("python-[0-9]*.json"):
-            m = re.match(r"python-(\d+\.\d+(?:\.\d+)?)-", f.name)
-            if m:
-                return m.group(1)
-    return "?" if (p / "bin" / "python").exists() else "-"
-
-
-def env_changed_ts(path: str | Path) -> float | None:
-    p = Path(path)
-    candidates = [p, p / "pyvenv.cfg", p / "conda-meta" / "history"]
-    candidates += list((p / "lib").glob("python*/site-packages")) if (p / "lib").is_dir() else []
-    stamps = []
-    for c in candidates:
-        try:
-            stamps.append(c.stat().st_mtime)
-        except OSError:
-            pass
-    return max(stamps) if stamps else None
-
-
-def _active_prefixes() -> set[str]:
-    out = set()
-    for p in (sys.prefix, os.environ.get("VIRTUAL_ENV"), os.environ.get("CONDA_PREFIX")):
-        if p:
-            try:
-                out.add(str(Path(p).resolve()))
-            except OSError:
-                pass
-    return out
-
-
-def make_env_item(
-    env: cli.Env, base_env: str, conda_base_env: str, active: set[str] | None = None
-) -> EnvItem:
-    active = _active_prefixes() if active is None else active
-    item = EnvItem(env=env, python=python_version_of(env.path), changed=env_changed_ts(env.path))
-    base = base_env if env.kind == "uv" else conda_base_env
-    if env.name.startswith(f"{base}_") and len(env.name) > len(base) + 1:
-        item.sandbox = env.name[len(base) + 1 :]
-    if env.name == base:
-        item.protected = "base env"
-    elif env.kind == "conda" and Path(env.path).parent.name != "envs":
-        item.protected = "conda installation root"
-    try:
-        if str(Path(env.path).resolve()) in active:
-            item.protected = "currently active env"
-    except OSError:
-        pass
-    return item
-
-
-def gather_envs(
-    venv_home: Path, conda: str | None, base_env: str, conda_base_env: str
-) -> list[EnvItem]:
-    """Every uv venv under *venv_home* and every conda env, uv first."""
-    active = _active_prefixes()
-    items: list[EnvItem] = []
-    for name, path in cli.uv_envs(venv_home).items():
-        items.append(make_env_item(cli.Env(name, path, "uv"), base_env, conda_base_env, active))
-    if conda:
-        for name, path in cli.conda_envs(conda).items():
-            if Path(path).parent.name != "envs":
-                name = "base"  # the conda installation itself
-            items.append(
-                make_env_item(cli.Env(name, path, "conda"), base_env, conda_base_env, active)
-            )
-    items.sort(key=lambda e: (e.env.kind != "uv", e.name.lower()))
-    return items
-
-
-# Runs inside the *target* env's interpreter: works without pip, and reports
-# editable installs (the thing worth verifying for worktree-backed sandboxes).
-PKG_SCRIPT = r"""
-import json, sys
-out = []
-try:
-    import importlib.metadata as md
-    for d in md.distributions():
-        try:
-            name = d.metadata["Name"] or "?"
-        except Exception:
-            name = "?"
-        editable = None
-        try:
-            raw = d.read_text("direct_url.json")
-            if raw:
-                du = json.loads(raw)
-                if du.get("dir_info", {}).get("editable"):
-                    editable = du.get("url", "")
-                    if editable.startswith("file://"):
-                        editable = editable[7:]
-        except Exception:
-            pass
-        out.append([name, d.version or "?", editable])
-except ImportError:
-    import pkg_resources
-    out = [[d.project_name, d.version, None] for d in pkg_resources.working_set]
-print(json.dumps(out))
-"""
-
-
-def list_packages(python: str, timeout: float = 120) -> tuple[list[Pkg], str | None]:
-    """(packages, error) for the interpreter at *python*."""
-    if not os.access(python, os.X_OK):
-        return [], "no python interpreter in this env"
-    try:
-        r = subprocess.run(
-            [python, "-I", "-c", PKG_SCRIPT], capture_output=True, text=True, timeout=timeout
-        )
-    except subprocess.TimeoutExpired:
-        return [], "timed out listing packages"
-    except OSError as exc:
-        return [], str(exc)
-    if r.returncode != 0:
-        lines = [line for line in r.stderr.strip().splitlines() if line.strip()]
-        return [], lines[-1] if lines else "interpreter failed"
-    try:
-        rows = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        return [], "unexpected output from interpreter"
-    seen: set[str] = set()
-    pkgs: list[Pkg] = []
-    for name, version, editable in rows:
-        key = name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        pkgs.append(Pkg(name, version, editable))
-    pkgs.sort(key=lambda p: p.name.lower())
-    return pkgs, None
-
-
-# ---------------------------------------------------------------------------
-# Curses UI
-# ---------------------------------------------------------------------------
 @dataclass
 class View:
     idx: int = 0
@@ -456,20 +82,11 @@ def _wt_summary(item: Item) -> str:
 
 
 class App:
-    def __init__(
-        self,
-        stdscr,
-        opts: argparse.Namespace,
-        root: Path,
-        venv_home: Path,
-        conda: str | None,
-        start_mode: str,
-    ) -> None:
+    def __init__(self, stdscr, opts: argparse.Namespace, project: Project, start_mode: str) -> None:
         self.scr = stdscr
         self.opts = opts
-        self.root = root
-        self.venv_home = venv_home
-        self.conda = conda
+        self.project = project
+        self.root = project.root
         self.mode = start_mode
         self.sb_items: list[Item] | None = None
         self.env_items: list[EnvItem] | None = None
@@ -498,25 +115,21 @@ class App:
     def ensure_loaded(self, mode: str) -> None:
         if mode == "sandboxes" and self.sb_items is None:
             self._loading("sandboxes (git status/log per worktree)")
-            self.sb_items, _ = gather(
-                self.root, self.opts.base_env, self.opts.conda_base_env, self.venv_home
-            )
+            self.sb_items = gather(self.project)
             paths = [e.path for i in self.sb_items for e in i.envs]
             paths += [str(w.wt.path) for i in self.sb_items for w in i.wts if not w.wt.prunable]
             self.sizes.add(paths)
         elif mode == "envs" and self.env_items is None:
             self._loading("environments")
-            self.env_items = gather_envs(
-                self.venv_home, self.conda, self.opts.base_env, self.opts.conda_base_env
-            )
+            self.env_items = gather_envs(self.project)
             for e in self.env_items:
                 self.env_cache[e.env.path] = e
             self.sizes.add([e.env.path for e in self.env_items])
 
-    def env_item_for(self, env: cli.Env) -> EnvItem:
+    def env_item_for(self, env: Env) -> EnvItem:
         item = self.env_cache.get(env.path)
         if item is None:
-            item = make_env_item(env, self.opts.base_env, self.opts.conda_base_env)
+            item = make_env_item(self.project, env)
             self.env_cache[env.path] = item
         return item
 
@@ -661,6 +274,10 @@ class App:
             self.toggle_all()
         elif ch == ord("/"):
             view.editing = True
+        elif ch == ord("r"):
+            self.sb_items, self.env_items = None, None
+            self.env_cache.clear()
+            self.ensure_loaded(self.mode)
         elif ch == TAB:
             self.mode = MODES[(MODES.index(self.mode) + 1) % len(MODES)]
             self.ensure_loaded(self.mode)
@@ -698,7 +315,9 @@ class App:
             return 1
         if isinstance(cur, EnvItem):
             return 4
-        return 1 + max(1, len(cur.envs)) + max(1, len(cur.wts))
+        return (
+            2 + max(1, len(cur.envs)) + max(1, len(cur.wts)) + len(cur.editables) + bool(cur.error)
+        )
 
     def _list_rows(self) -> int:
         h, _ = self.scr.getmaxyx()
@@ -740,7 +359,7 @@ class App:
                 f"[w] keep worktrees: {'YES' if t['keep_worktrees'] else 'no'}"
             )
         else:
-            line2 = f"uv venvs: {self.venv_home}   conda: {self.conda or 'not found'}"
+            line2 = f"base: {self.project.base} ({self.project.backend})   [r] refresh"
         _safe_add(scr, 2, 1, line2, dim)
         if view.filter or view.editing:
             cursor = "_" if view.editing else ""
@@ -793,7 +412,7 @@ class App:
         box = "[x]" if item.selected else "[ ]"
         env_sz = human_size(item.env_size_kb) if item.envs else "-"
         kinds = "/".join(e.kind for e in item.envs) or "-"
-        return f"{box} {item.name:<{name_w}} {kinds:>8} {env_sz:>6}  {_wt_summary(item)}"
+        return f"{box} {item.name:<{name_w}} {item.status:<9} {kinds:>8} {env_sz:>6}  {_wt_summary(item)}"
 
     def _draw_detail(self, y: int, cur, n_sel: int) -> None:
         scr = self.scr
@@ -844,6 +463,19 @@ class App:
         _safe_add(scr, y, 1, cur.name, bold)
         _safe_add(scr, y, 2 + len(cur.name), f"    selected: {n_sel}  ({total_str})", dim)
         y += 1
+        _safe_add(scr, y, 1, f"status: {cur.status}")
+        y += 1
+        if cur.error:
+            _safe_add(scr, y, 1, f"error: {cur.error}", bold)
+            y += 1
+        for link in cur.editables:
+            _safe_add(
+                scr,
+                y,
+                1,
+                f"{'shared' if link['shared'] else 'isolated'}  {link['name']} -> {link['path']}",
+            )
+            y += 1
         if cur.envs:
             for env in cur.envs:
                 _safe_add(
@@ -938,102 +570,116 @@ class App:
                 return result
 
 
-# ---------------------------------------------------------------------------
-# Deletion of plain envs (envs mode)
-# ---------------------------------------------------------------------------
-def delete_envs(items: list[EnvItem], conda: str | None, venv_home: Path, root: Path) -> int:
-    cli.log("environments to delete:")
-    for e in items:
-        note = f"   (sandbox '{e.sandbox}': worktrees are kept)" if e.sandbox else ""
-        print(f"    {e.env.kind:<5} {e.name:<32} {human_size(e.size_kb):>6}  {e.env.path}{note}")
+def project_picker(scr) -> str | None:
+    """Registered locations remain visible even if their disk is unavailable."""
+    idx, query, editing, message = 0, "", False, ""
+    rows = cli.project_overview()
+    scr.timeout(250)
     try:
-        answer = input(f"Delete the {len(items)} env(s) above? [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        answer = ""
-    if answer not in ("y", "yes"):
-        cli.log("aborted")
-        return 1
-
-    errors = 0
-    for e in items:
-        if e.protected:
-            cli.err(f"refusing to delete protected env '{e.name}' ({e.protected})")
-            errors += 1
-            continue
-        if e.env.kind == "conda":
-            if conda is None:
-                cli.err(f"cannot remove conda env '{e.name}': conda executable not found")
-                errors += 1
-                continue
-            cli.log(f"removing conda env '{e.name}'…")
-            r = cli.remove_env_at(conda, e.env.path)
-            if r.returncode != 0:
-                cli.err(f"conda env remove '{e.name}' failed: {r.stderr.strip()}")
-                errors += 1
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    while True:
+        visible = [r for r in rows if _matches(f"{r['name']} {r['root']} {r['id']}", query)]
+        idx = max(0, min(idx, len(visible) - 1))
+        scr.erase()
+        h, w = scr.getmaxyx()
+        _safe_add(scr, 0, 1, "awm — registered projects", curses.A_BOLD)
+        _safe_add(scr, 1, 1, "[enter] open  [/] filter  [r] refresh  [q] quit", curses.A_DIM)
+        _safe_add(scr, 2, 1, f"filter: {query}{'_' if editing else ''}")
+        page = max(1, h - 6)
+        top = max(0, idx - page + 1)
+        for n, row in enumerate(visible[top : top + page], start=top):
+            status = (
+                "unavailable"
+                if "unavailable" in row
+                else f"{row['sandboxes']} sandboxes {row['states']}"
+            )
+            _safe_add(
+                scr,
+                3 + n - top,
+                1,
+                f"{row['name']}  {status}  {row['root']}",
+                curses.A_REVERSE if n == idx else 0,
+            )
+        if not rows:
+            _safe_add(scr, 4, 1, "No projects registered. Use awm init or awm projects add PATH.")
+        if visible:
+            _safe_add(scr, h - 2, 1, visible[idx].get("unavailable", visible[idx]["id"]))
+        _safe_add(scr, h - 1, 1, message)
+        scr.refresh()
+        key = scr.getch()
+        if editing:
+            if key in ENTER_KEYS:
+                editing = False
+            elif key == ESC:
+                query, editing = "", False
+            elif key in BACKSPACE_KEYS:
+                query = query[:-1]
+            elif 32 <= key < 127:
+                query += chr(key)
+            idx = 0
+        elif key in (ord("q"), ESC):
+            return None
+        elif key in (curses.KEY_DOWN, ord("j")):
+            idx += 1
+        elif key in (curses.KEY_UP, ord("k")):
+            idx -= 1
+        elif key == ord("/"):
+            editing = True
+        elif key == ord("r"):
+            rows = cli.project_overview()
+        elif key in ENTER_KEYS and visible:
+            if "unavailable" in visible[idx]:
+                message = "Project unavailable; restore its location or unregister it."
             else:
-                cli.log(f"removed conda env '{e.name}'")
+                return visible[idx]["id"]
+
+
+def run_ui(opts: argparse.Namespace) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise AWMError("Interactive mode requires a TTY")
+    os.environ.setdefault("ESCDELAY", "25")
+    global_view = not (
+        getattr(opts, "root", None) or getattr(opts, "project", None)
+    ) and not getattr(opts, "envs", False)
+    while True:
+        if global_view:
+            project_id = curses.wrapper(project_picker)
+            if project_id is None:
+                return 0
+            project = registry.select(project=project_id)
         else:
-            cli.log(f"removing uv venv '{e.name}'…")
-            try:
-                cli.remove_uv_env(e.env.path, venv_home)
-            except (ValueError, OSError) as exc:
-                cli.err(f"uv venv remove '{e.name}' failed: {exc}")
-                errors += 1
+            project = cli.selected(opts)
+        holder = {}
+
+        def launch(scr, project=project, holder=holder):
+            app = App(scr, opts, project, "envs" if getattr(opts, "envs", False) else "sandboxes")
+            holder["app"] = app
+            return app.run()
+
+        result = curses.wrapper(launch)
+        app = holder["app"]
+        if result == "delete":
+            items = app.selected_items()
+            if app.mode == "envs":
+                paths = {item.env.path for item in items}
+                names = list(dict.fromkeys(item.sandbox for item in items if item.sandbox))
+                if any(item.protected or not item.sandbox for item in items):
+                    raise AWMError("Selection contains an unowned or protected environment")
+                kwargs = dict(keep_worktrees=True, environment_paths=paths)
+                for item in items:
+                    print(f"  {item.env.kind} {item.env.path} (worktrees kept)")
             else:
-                cli.log(f"removed uv venv '{e.name}'")
-    cli.sync_pycharm(root)
-    return 1 if errors else 0
-
-
-# ---------------------------------------------------------------------------
-# Entry point (wired from cli.cmd_ui / cli.cmd_envs)
-# ---------------------------------------------------------------------------
-def cmd_ui(opts: argparse.Namespace) -> int:
-    if not (sys.stdout.isatty() and sys.stdin.isatty()):
-        cli.err("interactive mode needs a TTY — use 'awm delete NAME…' / 'awm list' instead")
-        return 2
-
-    root = Path(opts.root).expanduser().resolve() if opts.root else cli.default_root()
-    if not cli.find_repos(root):
-        cli.err(f"no git repos found under {root} (use --root to point at the workspace)")
-        return 2
-    venv_home = (
-        Path(opts.venv_home).expanduser().resolve()
-        if opts.venv_home
-        else cli.default_venv_home(root)
-    )
-    conda = cli.find_conda()
-    start_mode = "envs" if getattr(opts, "envs", False) else "sandboxes"
-
-    os.environ.setdefault("ESCDELAY", "25")  # make Esc respond immediately
-    app_holder: dict[str, App] = {}
-
-    def run(stdscr) -> str:
-        app = App(stdscr, opts, root, venv_home, conda, start_mode)
-        app_holder["app"] = app
-        return app.run()
-
-    result = curses.wrapper(run)
-    app = app_holder["app"]
-    if result != "delete":
-        cli.log("nothing deleted")
-        return 0
-
-    if app.mode == "envs":
-        return delete_envs(app.selected_items(), conda, venv_home, root)
-
-    t = app.toggles
-    ns = argparse.Namespace(
-        names=[i.name for i in app.selected_items()],
-        root=str(root),
-        base_env=opts.base_env,
-        conda_base_env=opts.conda_base_env,
-        venv_home=str(venv_home),
-        dry_run=False,
-        force=t["force"],
-        yes=False,  # cmd_delete shows the plan and asks for a final y/N
-        keep_env=t["keep_env"],
-        keep_worktrees=t["keep_worktrees"],
-        delete_branch=t["delete_branch"],
-    )
-    return cli.cmd_delete(ns)
+                names = [item.name for item in items]
+                kwargs = app.toggles.copy()
+                for record in lifecycle.delete(project, names, dry_run=True, **kwargs):
+                    cli.print_plan(project, record)
+            lifecycle.delete(project, names, dry_run=True, **kwargs)
+            if cli.confirmation(f"Delete the selected resources in {project.name}?", False):
+                lifecycle.delete(project, names, **kwargs)
+                cli.log("Deletion complete")
+            if not global_view:
+                return 0
+        elif not global_view:
+            return 0
